@@ -2,5 +2,3 @@ node_modules/
 .env
 *.log
 .DS_Store
-.gitignore
-pushprep_PRD_v1.0.md
