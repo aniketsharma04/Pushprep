@@ -1,4 +1,4 @@
-x{
+{
   "name": "pushprep",
   "version": "1.0.0",
   "description": "Format → Stage → AI Commit. All in one command.",

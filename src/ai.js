@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import chalk from "chalk";
 import path from "path";
 
-const MODEL_NAME = "gemini-1.5-flash";
+const MODEL_NAME = "gemini-3.1-flash-lite-preview";
 const DIFF_CHAR_LIMIT = 3000;
 const API_TIMEOUT_MS = 15000;
 
@@ -59,8 +59,7 @@ function isModelNotFoundError(status, message) {
     status === 404 ||
     msg.includes("model not found") ||
     (msg.includes("models/") && msg.includes("not found")) ||
-    msg.includes("is not found") ||
-    msg.includes("not supported")
+    msg.includes("is not found")
   );
 }
 
