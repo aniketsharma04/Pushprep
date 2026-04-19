@@ -203,12 +203,23 @@ async function runPushPrep() {
     aiSpinner.stop(chalk.green("Got 3 commit message suggestions! ✨"));
   }
 
-  // Build select options: 3 AI messages + write custom
-  const commitOptions = messages.map((msg, i) => ({
-    value: msg,
-    label: msg,
-    hint: `Option ${i + 1}`,
-  }));
+  // Build select options: 3 AI messages + write custom.
+  // Each AI entry is indexed; we resolve the full subject+body after selection.
+  // Hint shows a body preview so the user can see at-a-glance whether a body
+  // was actually generated (catches silent empty-body regressions early).
+  const commitOptions = messages.map((msg, i) => {
+    const firstBodyLine = (msg.body || "").split("\n")[0] || "";
+    const preview = firstBodyLine
+      ? firstBodyLine.length > 70
+        ? firstBodyLine.slice(0, 67) + "…"
+        : firstBodyLine
+      : "(no body)";
+    return {
+      value: String(i),
+      label: msg.subject,
+      hint: preview,
+    };
+  });
   commitOptions.push({
     value: "__custom__",
     label: "✏️  Write my own commit message",
@@ -221,27 +232,55 @@ async function runPushPrep() {
   });
   handleCancel(chosen);
 
-  let finalMessage = chosen;
+  let finalSubject;
+  let finalBody;
 
-  // Custom message input
   if (chosen === "__custom__") {
-    const custom = await p.text({
-      message: "Enter your commit message:",
+    const customSubject = await p.text({
+      message: "Subject line (type(scope): description):",
       placeholder: "feat(scope): describe your change",
       validate(value) {
         if (!value || value.trim().length === 0)
-          return "Commit message cannot be empty.";
+          return "Subject cannot be empty.";
         if (value.length > 100)
-          return "Commit message must be 100 characters or fewer.";
+          return "Subject must be 100 characters or fewer.";
       },
     });
-    handleCancel(custom);
-    finalMessage = custom.trim();
+    handleCancel(customSubject);
+    finalSubject = customSubject.trim();
+
+    const customBody = await p.text({
+      message: "Body (optional — explain what and why, blank to skip):",
+      placeholder: "",
+      defaultValue: "",
+    });
+    handleCancel(customBody);
+    finalBody = (customBody || "").trim();
+  } else {
+    const picked = messages[Number(chosen)];
+    finalSubject = picked.subject;
+    finalBody = picked.body;
   }
 
-  // Confirm
+  // Preview the full commit so the user sees the body before confirming
+  const finalMessage = finalBody
+    ? `${finalSubject}\n\n${finalBody}`
+    : finalSubject;
+
+  console.log("");
+  console.log(chalk.dim("  ─── Commit preview ───"));
+  console.log(chalk.bold(`  ${finalSubject}`));
+  if (finalBody) {
+    console.log("");
+    for (const line of finalBody.split("\n")) {
+      console.log(chalk.dim(`  ${line}`));
+    }
+  }
+  console.log(chalk.dim("  ──────────────────────"));
+  console.log("");
+
   const confirmed = await p.confirm({
-    message: `Commit with: "${finalMessage}"?`,
+    message: "Commit with this message?",
     initialValue: true,
   });
   handleCancel(confirmed);
@@ -251,9 +290,8 @@ async function runPushPrep() {
     process.exit(0);
   }
 
-  // Commit
   await commitWithMessage(finalMessage);
-  p.log.success(chalk.green(`Committed: "${finalMessage}"`));
+  p.log.success(chalk.green(`Committed: "${finalSubject}"`));
 
   p.outro(chalk.bold.cyan("🚀 All done! Run git push whenever you're ready."));
 }

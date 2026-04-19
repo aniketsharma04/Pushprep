@@ -4,15 +4,15 @@
 
 ---
 
-| Field            | Detail                              |
-|------------------|-------------------------------------|
-| Product Name     | pushprep                            |
-| Document Type    | Product Requirements Document (PRD) |
-| Version          | 1.0                                 |
-| Author           | Aniket                              |
-| Status           | Active Development                  |
-| Target Platform  | npm (Node.js CLI, global install)   |
-| Target Audience  | Frontend / Full-stack Developers    |
+| Field           | Detail                              |
+| --------------- | ----------------------------------- |
+| Product Name    | pushprep                            |
+| Document Type   | Product Requirements Document (PRD) |
+| Version         | 1.0                                 |
+| Author          | Aniket                              |
+| Status          | Active Development                  |
+| Target Platform | npm (Node.js CLI, global install)   |
+| Target Audience | Frontend / Full-stack Developers    |
 
 ---
 
@@ -64,13 +64,13 @@ Each step is individually simple but collectively creates friction — so develo
 
 ### 2.2 What Goes Wrong Without pushprep
 
-| Problem | Impact |
-|---|---|
-| Skipping Prettier | Inconsistent code style across files and teammates |
-| Lazy commit messages | `git log` becomes useless; harder to review PRs and debug |
+| Problem                    | Impact                                                            |
+| -------------------------- | ----------------------------------------------------------------- |
+| Skipping Prettier          | Inconsistent code style across files and teammates                |
+| Lazy commit messages       | `git log` becomes useless; harder to review PRs and debug         |
 | Over-staging (`git add .`) | Accidentally committing debug code, `.env` files, build artifacts |
-| Under-staging | Missing files in a commit; broken builds for teammates |
-| Mental overhead | Breaks flow state; developers rush through the process |
+| Under-staging              | Missing files in a commit; broken builds for teammates            |
+| Mental overhead            | Breaks flow state; developers rush through the process            |
 
 ---
 
@@ -78,12 +78,12 @@ Each step is individually simple but collectively creates friction — so develo
 
 ### 3.1 The Four Phases
 
-| Phase | Name | What Happens |
-|---|---|---|
-| 1 | **Format** | Detect all changed files. Run Prettier on each formattable file. Respects `.prettierrc`. Write formatted output back to disk. |
-| 2 | **Status** | Use `simple-git` to display staged files and unstaged/untracked files clearly. |
-| 3 | **Stage** | Interactive prompt: stage all, stage specific files from a checklist, or skip. |
-| 4 | **AI Commit** | Send `git diff --staged` to Gemini. Get 3 Conventional Commit options. Developer picks one (or writes custom). Commit is created. |
+| Phase | Name          | What Happens                                                                                                                      |
+| ----- | ------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | **Format**    | Detect all changed files. Run Prettier on each formattable file. Respects `.prettierrc`. Write formatted output back to disk.     |
+| 2     | **Status**    | Use `simple-git` to display staged files and unstaged/untracked files clearly.                                                    |
+| 3     | **Stage**     | Interactive prompt: stage all, stage specific files from a checklist, or skip.                                                    |
+| 4     | **AI Commit** | Send `git diff --staged` to Gemini. Get 3 Conventional Commit options. Developer picks one (or writes custom). Commit is created. |
 
 ### 3.2 What pushprep Does NOT Do
 
@@ -113,15 +113,15 @@ Get a free Gemini API key at: https://aistudio.google.com/app/apikey
 
 ### 4.1 CLI Commands
 
-| Command | Arguments | Description |
-|---|---|---|
-| `pushprep` | (none) | Runs the full workflow (default command) |
-| `pushprep run` | (none) | Explicit alias for the default workflow |
-| `pushprep config` | `--key <api_key>` | Save or update the Gemini API key |
-| `pushprep config` | `--show` | Display masked API key and config file path |
-| `pushprep config` | `--remove` | Delete the saved API key from local storage |
-| `pushprep --version` | (none) | Print the installed version number |
-| `pushprep --help` | (none) | Print usage guide with examples |
+| Command              | Arguments         | Description                                 |
+| -------------------- | ----------------- | ------------------------------------------- |
+| `pushprep`           | (none)            | Runs the full workflow (default command)    |
+| `pushprep run`       | (none)            | Explicit alias for the default workflow     |
+| `pushprep config`    | `--key <api_key>` | Save or update the Gemini API key           |
+| `pushprep config`    | `--show`          | Display masked API key and config file path |
+| `pushprep config`    | `--remove`        | Delete the saved API key from local storage |
+| `pushprep --version` | (none)            | Print the installed version number          |
+| `pushprep --help`    | (none)            | Print usage guide with examples             |
 
 ---
 
@@ -170,11 +170,11 @@ After formatting, display:
 
 When unstaged files exist, present a `@clack/prompts` select menu with three options:
 
-| Option | Git Equivalent | Behavior |
-|---|---|---|
-| Stage all files | `git add .` | Stages every changed and untracked file |
+| Option                | Git Equivalent            | Behavior                                            |
+| --------------------- | ------------------------- | --------------------------------------------------- |
+| Stage all files       | `git add .`               | Stages every changed and untracked file             |
 | Choose specific files | `git add <file1> <file2>` | Opens a multi-select checklist of all changed files |
-| Skip staging | (none) | Proceeds with files already in the staging area |
+| Skip staging          | (none)                    | Proceeds with files already in the staging area     |
 
 #### 4.4.2 Multi-Select File Picker (for "Choose specific files")
 
@@ -195,42 +195,73 @@ When unstaged files exist, present a `@clack/prompts` select menu with three opt
 #### 4.5.1 Diff Extraction
 
 - Run `git diff --staged` to get the complete diff of staged changes
-- Truncate diff to **3000 characters** before sending to Gemini (prevents excessive token usage)
+- Truncate diff to **6000 characters** before sending to Gemini (enough context for meaningful bodies without runaway token usage)
 - Also pass the list of staged file names as additional context
 
-#### 4.5.2 Gemini Prompt Design
+#### 4.5.2 Gemini Prompt Design — Detailed Commits
 
-The prompt instructs the model to act as a senior software engineer and generate exactly 3 commit messages with these rules:
+The prompt instructs the model to act as a senior software engineer and return **3 detailed commit messages**. Each message is a structured object with a subject line and a multi-line body (not a single string). The goal is to produce commits that a teammate reading `git log` later can understand without re-reading the diff.
 
-- Follow **Conventional Commits** format: `type(scope): description`
-- Valid types: `feat`, `fix`, `refactor`, `chore`, `docs`, `style`, `test`, `perf`, `ci`
-- Each message must be **under 72 characters**
-- Three options must approach the change from **different angles** (what changed / why / impact)
-- Response must be a **raw JSON array of 3 strings** — no markdown, no preamble, no backticks
+Rules enforced in the prompt:
+
+- Subject follows **Conventional Commits**: `type(scope): description`, imperative mood, under 72 characters.
+- Valid types: `feat`, `fix`, `refactor`, `chore`, `docs`, `style`, `test`, `perf`, `ci`.
+- Body contains 2–4 short lines (under 100 chars each) covering **what** changed, **why** it changed, and any notable **impact or trade-off**.
+- Body must reference real identifiers (function names, modules, behavior) taken from the diff — no vague filler.
+- No bullet markers / dashes on body lines; lines are separated by `\n`.
+- The three options must approach the change from different angles (feature added / bug fixed / refactor or cleanup).
+- Response is a **raw JSON array of 3 objects**, each with `subject` and `body` keys. No markdown, preamble, or backticks.
 
 Example expected response:
+
 ```json
-["feat(auth): add JWT token refresh logic", "fix(auth): prevent session expiry on active users", "refactor(auth): improve token validation flow"]
+[
+  {
+    "subject": "feat(auth): add JWT refresh token rotation",
+    "body": "Introduces refreshToken() in authService to exchange an expiring access token for a new pair.\nPrevents silent session drops for users who keep a tab open past the 15-minute access window.\nRefresh tokens are single-use and revoked on rotation to limit replay risk."
+  },
+  {
+    "subject": "fix(auth): prevent session expiry on active users",
+    "body": "Active users were being logged out mid-request because the client never renewed its token.\nThe refresh flow now fires on 401 responses and retries the original request transparently."
+  },
+  {
+    "subject": "refactor(auth): extract token validation into helper",
+    "body": "Moves duplicated jwt.verify logic out of three middleware files into validateToken().\nNo behavior change for callers."
+  }
+]
 ```
+
+For backwards compatibility, if the model returns a plain string array (old format), each string is treated as a subject with an empty body.
 
 #### 4.5.3 Commit Message Selection UI
 
-1. Show the 3 AI-generated options in a `@clack/prompts` select menu
-2. Always include a 4th option: `✏️ Write my own commit message`
-3. If developer picks custom → show a text input with live validation:
-   - Non-empty required
-   - Max 100 characters
-4. After selection → show a confirmation prompt: `Commit with: "message"? (Y/n)`
-5. On confirm → run `git commit -m "message"`
+1. The select menu shows only the **subject line** of each AI-generated option (bodies would be too long for a single menu row).
+2. Always include a 4th option: `✏️ Write my own commit message`.
+3. If the developer picks an AI option → the full `subject + body` is resolved by index.
+4. If the developer picks custom → two prompts in sequence:
+   - **Subject**: text input, non-empty, max 100 characters.
+   - **Body**: optional text input; blank skips the body.
+5. Before confirming, a **preview block** is printed to the terminal showing the full multi-line commit message (subject bolded, body in dim text).
+6. Confirmation prompt: `Commit with this message? (Y/n)`.
+7. On confirm → run `git commit` with the full multi-line string (`subject\n\nbody`). `simple-git` passes multi-line messages to git as-is, producing a proper subject + body commit.
 
 #### 4.5.4 Local Fallback Messages
 
-If Gemini returns an unusable response or the API call fails entirely, generate 3 context-aware fallback messages locally using the staged file names:
+If Gemini returns an unusable response or the API call fails entirely, generate 3 context-aware fallback messages locally. Each fallback is also a `{ subject, body }` object so downstream code can treat AI and fallback responses uniformly.
+
+Subjects:
 
 ```
 chore(<scope>): update files and apply formatting
 refactor(<scope>): clean up code structure
 fix(<scope>): apply changes and fixes
+```
+
+Body (shared across all three fallbacks — lists the staged files and flags that AI was unavailable so the user knows to edit before pushing):
+
+```
+Touches N file(s): file1, file2, file3 (+M more).
+AI suggestions were unavailable, so this is a generic fallback — consider editing before pushing.
 ```
 
 Where `<scope>` is derived from the first staged file's name (without extension).
@@ -249,16 +280,16 @@ Every error in `pushprep` must be **actionable**. The user must never see a raw 
 
 ### 5.2 Gemini API Error Matrix
 
-| HTTP Code | Error Type | User-Facing Message | Resolution Shown to User |
-|---|---|---|---|
-| `429` | Quota Exhausted / Rate Limit | "🚫 Gemini API Quota Exhausted" | Get new key from a different Google account at `aistudio.google.com` |
-| `401` | Unauthorized | "🔑 Invalid Gemini API Key" | Verify key at `aistudio.google.com`, re-run `pushprep config --key` |
-| `403` | Permission Denied | "🔑 Invalid Gemini API Key" | Check key restrictions in Google AI Studio |
-| `400` | Bad Request / Invalid Key | "🔑 Invalid Gemini API Key" | Re-enter key using `pushprep config --key` |
-| Model Error | Model Not Found | "⚠️ Gemini model unavailable" | Update pushprep to latest version |
-| Network | Timeout / ECONNREFUSED | "⚠️ Network error" | Check internet connection and retry |
-| Safety | Content Blocked | "⚠️ Gemini blocked the request" | Fallback messages shown automatically |
-| Parse | Invalid JSON from Gemini | "⚠️ Could not parse AI response" | Fallback messages shown automatically |
+| HTTP Code   | Error Type                   | User-Facing Message              | Resolution Shown to User                                             |
+| ----------- | ---------------------------- | -------------------------------- | -------------------------------------------------------------------- |
+| `429`       | Quota Exhausted / Rate Limit | "🚫 Gemini API Quota Exhausted"  | Get new key from a different Google account at `aistudio.google.com` |
+| `401`       | Unauthorized                 | "🔑 Invalid Gemini API Key"      | Verify key at `aistudio.google.com`, re-run `pushprep config --key`  |
+| `403`       | Permission Denied            | "🔑 Invalid Gemini API Key"      | Check key restrictions in Google AI Studio                           |
+| `400`       | Bad Request / Invalid Key    | "🔑 Invalid Gemini API Key"      | Re-enter key using `pushprep config --key`                           |
+| Model Error | Model Not Found              | "⚠️ Gemini model unavailable"    | Update pushprep to latest version                                    |
+| Network     | Timeout / ECONNREFUSED       | "⚠️ Network error"               | Check internet connection and retry                                  |
+| Safety      | Content Blocked              | "⚠️ Gemini blocked the request"  | Fallback messages shown automatically                                |
+| Parse       | Invalid JSON from Gemini     | "⚠️ Could not parse AI response" | Fallback messages shown automatically                                |
 
 ### 5.3 Quota Exhaustion — Full Terminal Output
 
@@ -287,35 +318,37 @@ This is the most critical error case. The exact terminal output must look like t
 Detect quota errors by checking for **any** of the following:
 
 ```js
-status === 429
-|| message.includes("429")
-|| message.toLowerCase().includes("quota")
-|| message.toLowerCase().includes("rate limit")
-|| message.toLowerCase().includes("resource has been exhausted")
-|| message.toLowerCase().includes("too many requests")
+status === 429 ||
+  message.includes("429") ||
+  message.toLowerCase().includes("quota") ||
+  message.toLowerCase().includes("rate limit") ||
+  message.toLowerCase().includes("resource has been exhausted") ||
+  message.toLowerCase().includes("too many requests");
 ```
 
 Detect invalid key errors by checking for **any** of the following:
 
 ```js
-status === 400 || status === 401 || status === 403
-|| message.toLowerCase().includes("api key not valid")
-|| message.toLowerCase().includes("invalid api key")
-|| message.toLowerCase().includes("permission denied")
-|| message.toLowerCase().includes("unauthorized")
+status === 400 ||
+  status === 401 ||
+  status === 403 ||
+  message.toLowerCase().includes("api key not valid") ||
+  message.toLowerCase().includes("invalid api key") ||
+  message.toLowerCase().includes("permission denied") ||
+  message.toLowerCase().includes("unauthorized");
 ```
 
 ### 5.5 Non-API Errors
 
-| Scenario | Detection | Behavior |
-|---|---|---|
-| Not a git repository | `git.status()` throws | Exit with: "Not a git repository. Run pushprep inside a git project." |
-| No API key configured | `getApiKey()` returns `null` | Exit with instructions to run `pushprep config --key` |
-| No changed files | `allChanged.length === 0` | Exit with: "Nothing to stage or commit. You're all clean! 🎉" |
-| No staged files after staging | `staged.length === 0` | Exit with warning to stage files first |
-| Prettier fails on a file | `try/catch` per file | Show `⚠` warning for that file, continue with the rest |
-| User presses Ctrl+C | `p.isCancel()` check at every prompt | Show "Cancelled." gracefully, no crash, `process.exit(0)` |
-| Config file corrupted | `JSON.parse` try/catch | Return empty config, continue as fresh install |
+| Scenario                      | Detection                            | Behavior                                                              |
+| ----------------------------- | ------------------------------------ | --------------------------------------------------------------------- |
+| Not a git repository          | `git.status()` throws                | Exit with: "Not a git repository. Run pushprep inside a git project." |
+| No API key configured         | `getApiKey()` returns `null`         | Exit with instructions to run `pushprep config --key`                 |
+| No changed files              | `allChanged.length === 0`            | Exit with: "Nothing to stage or commit. You're all clean! 🎉"         |
+| No staged files after staging | `staged.length === 0`                | Exit with warning to stage files first                                |
+| Prettier fails on a file      | `try/catch` per file                 | Show `⚠` warning for that file, continue with the rest                |
+| User presses Ctrl+C           | `p.isCancel()` check at every prompt | Show "Cancelled." gracefully, no crash, `process.exit(0)`             |
+| Config file corrupted         | `JSON.parse` try/catch               | Return empty config, continue as fresh install                        |
 
 ---
 
@@ -339,6 +372,7 @@ pushprep/
 ### 6.2 Module Responsibilities
 
 #### `cli.js`
+
 - Define the Commander program, version, and all sub-commands
 - Implement the main `runPushPrep()` async function that orchestrates all four phases in sequence
 - All `@clack/prompts` UI interactions (select, multiselect, text, confirm, spinner, intro, outro)
@@ -346,6 +380,7 @@ pushprep/
 - Call `commitWithMessage()` as the final step
 
 #### `ai.js`
+
 - Initialize `GoogleGenerativeAI` with the user's API key
 - Build the Gemini prompt string (with diff + file list)
 - Call `model.generateContent()` and parse the JSON array response
@@ -353,31 +388,34 @@ pushprep/
 - Generate local fallback commit messages when AI fails
 
 #### `config.js`
+
 - Create `~/.pushprep/` directory if it doesn't exist
 - Read/write `~/.pushprep/config.json`
 - Expose: `saveApiKey(key)`, `getApiKey()`, `removeApiKey()`, `showConfig()`
 - Mask key in `showConfig()` output: show first 6 chars + bullets + last 4 chars
 
 #### `formatter.js`
+
 - Filter changed files by supported extension list
 - For each file: call `prettier.resolveConfig()`, `prettier.getFileInfo()`, `prettier.format()`
 - Write formatted content back to disk if it differs from original
 - Return `{ formatted: [], failed: [] }` summary
 
 #### `git.js`
+
 - Expose: `isGitRepo()`, `getGitStatus()`, `getAllChangedFiles()`, `stageAllFiles()`, `stageSpecificFiles(files)`, `getStagedFiles()`, `getDiff()`, `commitWithMessage(message)`
 - All operations use `simple-git` — no shelling out with `exec`
 
 ### 6.3 Dependency Stack
 
-| Package | Version | Purpose |
-|---|---|---|
-| `prettier` | `^3.2.5` | Code formatting engine — used as a library, not shelled out |
-| `simple-git` | `^3.22.0` | Node.js wrapper for all git CLI operations |
-| `@clack/prompts` | `^0.7.0` | Interactive terminal prompts (select, multiselect, text, confirm, spinner) |
-| `@google/generative-ai` | `^0.21.0` | Official Google Gemini SDK for Node.js |
-| `commander` | `^12.0.0` | CLI argument parsing, sub-commands, help text, version flag |
-| `chalk` | `^5.3.0` | Terminal string styling — colors, bold, dim (ESM-only in v5) |
+| Package                 | Version   | Purpose                                                                    |
+| ----------------------- | --------- | -------------------------------------------------------------------------- |
+| `prettier`              | `^3.2.5`  | Code formatting engine — used as a library, not shelled out                |
+| `simple-git`            | `^3.22.0` | Node.js wrapper for all git CLI operations                                 |
+| `@clack/prompts`        | `^0.7.0`  | Interactive terminal prompts (select, multiselect, text, confirm, spinner) |
+| `@google/generative-ai` | `^0.21.0` | Official Google Gemini SDK for Node.js                                     |
+| `commander`             | `^12.0.0` | CLI argument parsing, sub-commands, help text, version flag                |
+| `chalk`                 | `^5.3.0`  | Terminal string styling — colors, bold, dim (ESM-only in v5)               |
 
 ### 6.4 `package.json` Key Fields
 
@@ -487,20 +525,20 @@ $ pushprep
 
 ## 8. Non-Functional Requirements
 
-| Category | Requirement | Detail |
-|---|---|---|
-| Performance | Cold start < 500ms | Excluding Prettier format time and Gemini API latency |
-| Performance | Gemini API timeout | If Gemini takes > 15s, fall back to local messages automatically |
-| Reliability | No crash on any user error | All user-facing errors exit via `process.exit(0 or 1)` — never uncaught exceptions |
-| Reliability | No crash on Gemini failure | All API errors are caught and handled — workflow ends gracefully or uses fallback |
-| Security | API key never logged raw | Masked in all display outputs (`AIzaSy••••••••••••y8Xz`) |
-| Security | No telemetry | Zero usage data, analytics, or tracking of any kind |
-| Compatibility | macOS + Linux + Windows | All file paths use Node.js cross-platform APIs (no hardcoded `/` or `\`) |
-| Compatibility | Node.js >= 18 enforced | Via `"engines"` field in `package.json` |
-| Usability | Zero config for formatting | Works out of the box — no pushprep-specific config file required |
-| Usability | Respects existing `.prettierrc` | Never overrides project's existing formatter preferences |
-| Maintainability | Single-responsibility modules | Each of the 5 source files has one clear, isolated concern |
-| Package size | Minimal dependencies | Only 6 runtime dependencies; no bloated transitive dep chains |
+| Category        | Requirement                     | Detail                                                                             |
+| --------------- | ------------------------------- | ---------------------------------------------------------------------------------- |
+| Performance     | Cold start < 500ms              | Excluding Prettier format time and Gemini API latency                              |
+| Performance     | Gemini API timeout              | If Gemini takes > 15s, fall back to local messages automatically                   |
+| Reliability     | No crash on any user error      | All user-facing errors exit via `process.exit(0 or 1)` — never uncaught exceptions |
+| Reliability     | No crash on Gemini failure      | All API errors are caught and handled — workflow ends gracefully or uses fallback  |
+| Security        | API key never logged raw        | Masked in all display outputs (`AIzaSy••••••••••••y8Xz`)                           |
+| Security        | No telemetry                    | Zero usage data, analytics, or tracking of any kind                                |
+| Compatibility   | macOS + Linux + Windows         | All file paths use Node.js cross-platform APIs (no hardcoded `/` or `\`)           |
+| Compatibility   | Node.js >= 18 enforced          | Via `"engines"` field in `package.json`                                            |
+| Usability       | Zero config for formatting      | Works out of the box — no pushprep-specific config file required                   |
+| Usability       | Respects existing `.prettierrc` | Never overrides project's existing formatter preferences                           |
+| Maintainability | Single-responsibility modules   | Each of the 5 source files has one clear, isolated concern                         |
+| Package size    | Minimal dependencies            | Only 6 runtime dependencies; no bloated transitive dep chains                      |
 
 ---
 
@@ -519,11 +557,11 @@ $ pushprep
 
 ### 9.2 Versioning Strategy (Semantic Versioning)
 
-| Bump | When | Example |
-|---|---|---|
-| **Patch** `x.x.1` | Bug fixes, error message improvements, minor UX tweaks | `1.0.1` — fix quota error detection |
-| **Minor** `x.1.0` | New backward-compatible features | `1.1.0` — add OpenAI as alternative to Gemini |
-| **Major** `2.0.0` | Breaking changes to CLI interface or behavior | `2.0.0` — replace prompt library |
+| Bump              | When                                                   | Example                                       |
+| ----------------- | ------------------------------------------------------ | --------------------------------------------- |
+| **Patch** `x.x.1` | Bug fixes, error message improvements, minor UX tweaks | `1.0.1` — fix quota error detection           |
+| **Minor** `x.1.0` | New backward-compatible features                       | `1.1.0` — add OpenAI as alternative to Gemini |
+| **Major** `2.0.0` | Breaking changes to CLI interface or behavior          | `2.0.0` — replace prompt library              |
 
 ### 9.3 `.npmignore`
 
@@ -538,16 +576,16 @@ node_modules/
 
 ## 10. Future Roadmap (Post v1.0)
 
-| Priority | Feature | Target Version | Description |
-|---|---|---|---|
-| P1 | ESLint integration | v1.1 | Run `eslint --fix` on changed files before Prettier |
-| P1 | `--push` flag | v1.1 | Optional flag to also run `git push` after committing |
-| P1 | Multiple AI providers | v1.1 | Allow choosing between Gemini, OpenAI GPT-4o, or Anthropic Claude |
-| P2 | Commit history learning | v1.2 | Analyze last 20 commits to match team's existing commit style |
-| P2 | Branch awareness | v1.2 | Include current branch name in Gemini prompt for better scope inference |
-| P2 | Diff preview | v1.2 | Show condensed diff summary before the AI generation step |
-| P3 | Team config file | v2.0 | Shared `.pushpreprc` committed to the repo for team-wide settings |
-| P3 | Git hooks integration | v2.0 | Auto-run pushprep as a pre-push hook via husky or lefthook |
+| Priority | Feature                 | Target Version | Description                                                             |
+| -------- | ----------------------- | -------------- | ----------------------------------------------------------------------- |
+| P1       | ESLint integration      | v1.1           | Run `eslint --fix` on changed files before Prettier                     |
+| P1       | `--push` flag           | v1.1           | Optional flag to also run `git push` after committing                   |
+| P1       | Multiple AI providers   | v1.1           | Allow choosing between Gemini, OpenAI GPT-4o, or Anthropic Claude       |
+| P2       | Commit history learning | v1.2           | Analyze last 20 commits to match team's existing commit style           |
+| P2       | Branch awareness        | v1.2           | Include current branch name in Gemini prompt for better scope inference |
+| P2       | Diff preview            | v1.2           | Show condensed diff summary before the AI generation step               |
+| P3       | Team config file        | v2.0           | Shared `.pushpreprc` committed to the repo for team-wide settings       |
+| P3       | Git hooks integration   | v2.0           | Auto-run pushprep as a pre-push hook via husky or lefthook              |
 
 ---
 
@@ -555,11 +593,11 @@ node_modules/
 
 ### 11.1 Launch Goals (First 30 Days)
 
-| Metric | Target |
-|---|---|
-| npm weekly downloads | 500+ / week |
-| GitHub stars | 50+ |
-| Zero critical bugs | No unhandled crashes reported |
+| Metric                     | Target                                   |
+| -------------------------- | ---------------------------------------- |
+| npm weekly downloads       | 500+ / week                              |
+| GitHub stars               | 50+                                      |
+| Zero critical bugs         | No unhandled crashes reported            |
 | Documentation completeness | README covers 100% of features and setup |
 
 ### 11.2 Pre-Launch Quality Checklist
@@ -577,17 +615,17 @@ node_modules/
 
 ### 12.1 Conventional Commits Quick Reference
 
-| Type | When to Use | Example |
-|---|---|---|
-| `feat` | New feature | `feat(auth): add Google OAuth login` |
-| `fix` | Bug fix | `fix(api): handle null response from payments endpoint` |
-| `refactor` | Code change, no feature/fix | `refactor(utils): extract date formatting logic` |
-| `style` | Formatting only, no logic change | `style(button): apply Prettier formatting` |
-| `docs` | Documentation only | `docs(readme): add troubleshooting section` |
-| `chore` | Build process or tooling | `chore(deps): update prettier to 3.3.0` |
-| `test` | Adding or updating tests | `test(auth): add unit tests for token refresh` |
-| `perf` | Performance improvement | `perf(images): lazy load product thumbnails` |
-| `ci` | CI/CD configuration | `ci(github): add Node 20 to test matrix` |
+| Type       | When to Use                      | Example                                                 |
+| ---------- | -------------------------------- | ------------------------------------------------------- |
+| `feat`     | New feature                      | `feat(auth): add Google OAuth login`                    |
+| `fix`      | Bug fix                          | `fix(api): handle null response from payments endpoint` |
+| `refactor` | Code change, no feature/fix      | `refactor(utils): extract date formatting logic`        |
+| `style`    | Formatting only, no logic change | `style(button): apply Prettier formatting`              |
+| `docs`     | Documentation only               | `docs(readme): add troubleshooting section`             |
+| `chore`    | Build process or tooling         | `chore(deps): update prettier to 3.3.0`                 |
+| `test`     | Adding or updating tests         | `test(auth): add unit tests for token refresh`          |
+| `perf`     | Performance improvement          | `perf(images): lazy load product thumbnails`            |
+| `ci`       | CI/CD configuration              | `ci(github): add Node 20 to test matrix`                |
 
 ### 12.2 Key External Links
 
@@ -600,4 +638,4 @@ node_modules/
 
 ---
 
-*pushprep PRD v1.0 — Built with intention. Shipped with confidence.*
+_pushprep PRD v1.0 — Built with intention. Shipped with confidence._

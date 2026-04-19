@@ -1,4 +1,4 @@
-import simpleGit from 'simple-git';
+import simpleGit from "simple-git";
 
 const git = simpleGit();
 
@@ -56,7 +56,7 @@ export async function getStagedFiles() {
  * Stages all changed files (git add .).
  */
 export async function stageAllFiles() {
-  await git.add('.');
+  await git.add(".");
 }
 
 /**
@@ -71,7 +71,7 @@ export async function stageSpecificFiles(files) {
  * Returns the staged diff (git diff --staged).
  */
 export async function getDiff() {
-  return await git.diff(['--staged']);
+  return await git.diff(["--staged"]);
 }
 
 /**
