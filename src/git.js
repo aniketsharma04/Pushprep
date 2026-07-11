@@ -75,6 +75,15 @@ export async function getDiff() {
 }
 
 /**
+ * Returns a per-file summary of the staged changes (git diff --staged --stat).
+ * Passed to the AI alongside the diff so multi-file commits are always described
+ * in full — even when the raw diff is truncated for length.
+ */
+export async function getDiffStat() {
+  return await git.diff(["--staged", "--stat"]);
+}
+
+/**
  * Commits with the given message.
  * @param {string} message
  */

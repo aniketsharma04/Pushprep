@@ -16,6 +16,7 @@ import {
   stageSpecificFiles,
   getStagedFiles,
   getDiff,
+  getDiffStat,
   commitWithMessage,
 } from "./git.js";
 import { formatFiles } from "./formatter.js";
@@ -187,6 +188,7 @@ async function runPushPrep() {
   // PHASE 4 — AI COMMIT
   // ═══════════════════════════════════════════════════════════════════════════
   const diff = await getDiff();
+  const diffStat = await getDiffStat();
 
   const aiSpinner = p.spinner();
   aiSpinner.start("Asking Gemini AI to generate commit messages...");
@@ -195,6 +197,7 @@ async function runPushPrep() {
     diff,
     staged,
     apiKey,
+    diffStat,
   );
 
   if (usedFallback) {
@@ -262,36 +265,79 @@ async function runPushPrep() {
     finalBody = picked.body;
   }
 
-  // Preview the full commit so the user sees the body before confirming
-  const finalMessage = finalBody
-    ? `${finalSubject}\n\n${finalBody}`
-    : finalSubject;
+  // Preview + confirm loop. The user can commit as-is, edit the subject/body
+  // inline (pre-filled so they only tweak what they want), or cancel.
+  while (true) {
+    const finalMessage = finalBody
+      ? `${finalSubject}\n\n${finalBody}`
+      : finalSubject;
 
-  console.log("");
-  console.log(chalk.dim("  ─── Commit preview ───"));
-  console.log(chalk.bold(`  ${finalSubject}`));
-  if (finalBody) {
     console.log("");
-    for (const line of finalBody.split("\n")) {
-      console.log(chalk.dim(`  ${line}`));
+    console.log(chalk.dim("  ─── Commit preview ───"));
+    console.log(chalk.bold(`  ${finalSubject}`));
+    if (finalBody) {
+      console.log("");
+      for (const line of finalBody.split("\n")) {
+        console.log(chalk.dim(`  ${line}`));
+      }
     }
+    console.log(chalk.dim("  ──────────────────────"));
+    console.log("");
+
+    const action = await p.select({
+      message: "Ready to commit?",
+      options: [
+        { value: "commit", label: "Commit with this message", hint: "" },
+        {
+          value: "edit",
+          label: "Edit before committing",
+          hint: "Tweak the subject / body",
+        },
+        {
+          value: "cancel",
+          label: "Cancel",
+          hint: "Keep files staged, don't commit",
+        },
+      ],
+    });
+    handleCancel(action);
+
+    if (action === "cancel") {
+      p.cancel("Commit cancelled. Your staged files are still staged.");
+      process.exit(0);
+    }
+
+    if (action === "edit") {
+      const editedSubject = await p.text({
+        message: "Subject line (type(scope): description):",
+        initialValue: finalSubject,
+        validate(value) {
+          if (!value || value.trim().length === 0)
+            return "Subject cannot be empty.";
+          if (value.length > 100)
+            return "Subject must be 100 characters or fewer.";
+        },
+      });
+      handleCancel(editedSubject);
+      finalSubject = editedSubject.trim();
+
+      const editedBody = await p.text({
+        message: "Body (optional — explain what and why, blank to skip):",
+        initialValue: finalBody,
+        defaultValue: "",
+      });
+      handleCancel(editedBody);
+      finalBody = (editedBody || "").trim();
+
+      // Loop back to re-preview the edited message before committing.
+      continue;
+    }
+
+    // action === "commit"
+    await commitWithMessage(finalMessage);
+    p.log.success(chalk.green(`Committed: "${finalSubject}"`));
+    break;
   }
-  console.log(chalk.dim("  ──────────────────────"));
-  console.log("");
-
-  const confirmed = await p.confirm({
-    message: "Commit with this message?",
-    initialValue: true,
-  });
-  handleCancel(confirmed);
-
-  if (!confirmed) {
-    p.cancel("Commit cancelled. Your staged files are still staged.");
-    process.exit(0);
-  }
-
-  await commitWithMessage(finalMessage);
-  p.log.success(chalk.green(`Committed: "${finalSubject}"`));
 
   p.outro(chalk.bold.cyan("🚀 All done! Run git push whenever you're ready."));
 }
