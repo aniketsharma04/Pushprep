@@ -4,3 +4,8 @@ node_modules/
 .DS_Store
 .gitignore
 pushprep_PRD_v1.0.md
+test/
+.github/
+.claude/
+plans/
+*.tgz

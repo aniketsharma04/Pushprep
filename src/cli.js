@@ -11,13 +11,20 @@ import { saveApiKey, getApiKey, removeApiKey, showConfig } from "./config.js";
 import {
   isGitRepo,
   getAllChangedFiles,
-  getGitStatus,
+  getChangeSets,
   stageAllFiles,
   stageSpecificFiles,
   getStagedFiles,
   getDiff,
   getDiffStat,
   commitWithMessage,
+  amendWithMessage,
+  hasCommits,
+  getLastCommitMessage,
+  getLastCommitDiff,
+  getLastCommitFiles,
+  getCurrentBranch,
+  pushCurrent,
 } from "./git.js";
 import { formatFiles } from "./formatter.js";
 import { generateCommitMessages, checkModel } from "./ai.js";
@@ -53,6 +60,8 @@ function handleCancel(value) {
 
 // ─── Main Workflow ───────────────────────────────────────────────────────────
 async function runPushPrep(opts = {}) {
+  const isAmend = !!opts.amend;
+
   printBanner();
   p.intro(chalk.bold("Starting your pre-push workflow..."));
 
@@ -81,19 +90,27 @@ async function runPushPrep(opts = {}) {
   // ═══════════════════════════════════════════════════════════════════════════
   const allChanged = await getAllChangedFiles();
 
-  if (allChanged.length === 0) {
+  // A clean tree is a hard stop for a normal run, but valid for --amend
+  // (rewording the previous commit needs no new changes).
+  if (allChanged.length === 0 && !isAmend) {
     p.outro(chalk.green("Nothing to stage or commit. You're all clean! 🎉"));
     process.exit(0);
   }
 
-  const formatSpinner = p.spinner();
-  formatSpinner.start(
-    `Running Prettier on ${allChanged.length} changed file(s)...`,
-  );
+  let formatted = [];
+  let alreadyClean = [];
+  let failed = [];
 
-  const { formatted, alreadyClean, failed } = await formatFiles(allChanged);
+  if (allChanged.length > 0) {
+    const formatSpinner = p.spinner();
+    formatSpinner.start(
+      `Running Prettier on ${allChanged.length} changed file(s)...`,
+    );
 
-  formatSpinner.stop(`Prettier done.`);
+    ({ formatted, alreadyClean, failed } = await formatFiles(allChanged));
+
+    formatSpinner.stop(`Prettier done.`);
+  }
 
   // Print per-file formatting results
   for (const f of formatted) {
@@ -109,11 +126,9 @@ async function runPushPrep(opts = {}) {
   // ═══════════════════════════════════════════════════════════════════════════
   // PHASE 2 — STATUS
   // ═══════════════════════════════════════════════════════════════════════════
-  const status = await getGitStatus();
-
-  const unstaged = [...status.modified, ...status.not_added, ...status.deleted];
-
-  const alreadyStaged = [...status.staged, ...status.created];
+  // getChangeSets classifies via the porcelain codes so a fully-staged file no
+  // longer shows up under both "Unstaged" and "Already staged".
+  const { unstaged, staged: alreadyStaged } = await getChangeSets();
 
   if (unstaged.length > 0) {
     console.log("");
@@ -175,9 +190,18 @@ async function runPushPrep(opts = {}) {
     }
   }
 
-  // ── Validate: something must be staged ────────────────────────────────────
+  // ── Validate ──────────────────────────────────────────────────────────────
   const staged = await getStagedFiles();
-  if (staged.length === 0) {
+
+  if (isAmend) {
+    if (!(await hasCommits())) {
+      p.log.error("No previous commit to amend. Make a commit first.");
+      process.exit(1);
+    }
+    p.log.info(
+      chalk.dim("Amend mode — this will rewrite your previous commit."),
+    );
+  } else if (staged.length === 0) {
     p.log.warn(
       "No staged files found. Stage your files first, then run pushprep again.",
     );
@@ -187,94 +211,131 @@ async function runPushPrep(opts = {}) {
   // ═══════════════════════════════════════════════════════════════════════════
   // PHASE 4 — AI COMMIT
   // ═══════════════════════════════════════════════════════════════════════════
-  const diff = await getDiff();
+  // In amend mode we describe the previous commit's diff (plus any newly staged
+  // changes that will be folded in). Otherwise we describe the staged diff.
+  let diff;
+  let filesForPrompt;
+  if (isAmend) {
+    const lastDiff = await getLastCommitDiff();
+    const stagedDiff = await getDiff();
+    diff = stagedDiff ? `${lastDiff}\n${stagedDiff}` : lastDiff;
+    filesForPrompt = [...new Set([...staged, ...(await getLastCommitFiles())])];
+  } else {
+    diff = await getDiff();
+    filesForPrompt = staged;
+  }
   const diffStat = await getDiffStat();
 
-  const aiSpinner = p.spinner();
-  aiSpinner.start("Asking Gemini AI to generate commit messages...");
-
-  const { messages, usedFallback } = await generateCommitMessages(
-    diff,
-    staged,
-    apiKey,
-    diffStat,
-    { model: opts.model },
-  );
-
-  if (usedFallback) {
-    aiSpinner.stop(chalk.yellow("Using local fallback commit messages."));
-  } else {
-    aiSpinner.stop(chalk.green("Got 3 commit message suggestions! ✨"));
-  }
-
-  // Build select options: 3 AI messages + write custom.
-  // Each AI entry is indexed; we resolve the full subject+body after selection.
-  // Hint shows a body preview so the user can see at-a-glance whether a body
-  // was actually generated (catches silent empty-body regressions early).
-  const commitOptions = messages.map((msg, i) => {
-    const firstBodyLine = (msg.body || "").split("\n")[0] || "";
-    const preview = firstBodyLine
-      ? firstBodyLine.length > 70
-        ? firstBodyLine.slice(0, 67) + "…"
-        : firstBodyLine
-      : "(no body)";
-    return {
-      value: String(i),
-      label: msg.subject,
-      hint: preview,
-    };
-  });
-  commitOptions.push({
-    value: "__custom__",
-    label: "✏️  Write my own commit message",
-    hint: "",
-  });
-
-  const chosen = await p.select({
-    message: "Choose your commit message:",
-    options: commitOptions,
-  });
-  handleCancel(chosen);
-
+  // Generation + selection loop — supports 🔄 Regenerate for fresh suggestions.
   let finalSubject;
   let finalBody;
+  let attempt = 0;
 
-  if (chosen === "__custom__") {
-    const customSubject = await p.text({
-      message: "Subject line (type(scope): description):",
-      placeholder: "feat(scope): describe your change",
-      validate(value) {
-        if (!value || value.trim().length === 0)
-          return "Subject cannot be empty.";
-        if (value.length > 100)
-          return "Subject must be 100 characters or fewer.";
+  while (finalSubject === undefined) {
+    const aiSpinner = p.spinner();
+    aiSpinner.start(
+      attempt === 0
+        ? "Asking Gemini AI to generate commit messages..."
+        : "Regenerating commit messages...",
+    );
+
+    const { messages, usedFallback } = await generateCommitMessages(
+      diff,
+      filesForPrompt,
+      apiKey,
+      diffStat,
+      {
+        model: opts.model,
+        // Nudge the temperature up on regenerate so fresh options differ.
+        temperature: attempt === 0 ? undefined : 0.7,
       },
-    });
-    handleCancel(customSubject);
-    finalSubject = customSubject.trim();
+    );
+    attempt++;
 
-    const customBody = await p.text({
-      message: "Body (optional — explain what and why, blank to skip):",
-      placeholder: "",
-      defaultValue: "",
+    if (usedFallback) {
+      aiSpinner.stop(chalk.yellow("Using local fallback commit messages."));
+    } else {
+      aiSpinner.stop(chalk.green("Got 3 commit message suggestions! ✨"));
+    }
+
+    // Print each suggestion in FULL (subject + complete body) above the menu so
+    // the whole message is readable while choosing — the select row itself can
+    // only fit one line, which truncates longer bodies.
+    console.log("");
+    messages.forEach((msg, i) => {
+      console.log(chalk.cyan.bold(`  ${i + 1}. ${msg.subject}`));
+      if (msg.body) {
+        for (const line of msg.body.split("\n")) {
+          console.log(chalk.dim(`     ${line}`));
+        }
+      }
+      console.log("");
     });
-    handleCancel(customBody);
-    finalBody = (customBody || "").trim();
-  } else {
-    const picked = messages[Number(chosen)];
-    finalSubject = picked.subject;
-    finalBody = picked.body;
+
+    // The menu labels mirror the numbered blocks above; no truncated hint needed.
+    const commitOptions = messages.map((msg, i) => ({
+      value: String(i),
+      label: `${i + 1}. ${msg.subject}`,
+    }));
+    commitOptions.push({
+      value: "__regenerate__",
+      label: "🔄 Regenerate suggestions",
+      hint: "Get 3 new options",
+    });
+    commitOptions.push({
+      value: "__custom__",
+      label: "✏️  Write my own commit message",
+      hint: "",
+    });
+
+    const chosen = await p.select({
+      message: "Choose your commit message (full text shown above):",
+      options: commitOptions,
+    });
+    handleCancel(chosen);
+
+    if (chosen === "__regenerate__") {
+      continue; // loop and generate a fresh set
+    }
+
+    if (chosen === "__custom__") {
+      const customSubject = await p.text({
+        message: "Subject line (type(scope): description):",
+        placeholder: "feat(scope): describe your change",
+        validate(value) {
+          if (!value || value.trim().length === 0)
+            return "Subject cannot be empty.";
+          if (value.length > 100)
+            return "Subject must be 100 characters or fewer.";
+        },
+      });
+      handleCancel(customSubject);
+      finalSubject = customSubject.trim();
+
+      const customBody = await p.text({
+        message: "Body (optional — explain what and why, blank to skip):",
+        placeholder: "",
+        defaultValue: "",
+      });
+      handleCancel(customBody);
+      finalBody = (customBody || "").trim();
+    } else {
+      const picked = messages[Number(chosen)];
+      finalSubject = picked.subject;
+      finalBody = picked.body;
+    }
   }
 
   // Preview + confirm loop. The user can commit as-is, edit the subject/body
   // inline (pre-filled so they only tweak what they want), or cancel.
+  const verb = isAmend ? "amend" : "commit";
   while (true) {
     const finalMessage = finalBody
       ? `${finalSubject}\n\n${finalBody}`
       : finalSubject;
 
     console.log("");
-    console.log(chalk.dim("  ─── Commit preview ───"));
+    console.log(chalk.dim(`  ─── ${isAmend ? "Amend" : "Commit"} preview ───`));
     console.log(chalk.bold(`  ${finalSubject}`));
     if (finalBody) {
       console.log("");
@@ -286,12 +347,18 @@ async function runPushPrep(opts = {}) {
     console.log("");
 
     const action = await p.select({
-      message: "Ready to commit?",
+      message: `Ready to ${verb}?`,
       options: [
-        { value: "commit", label: "Commit with this message", hint: "" },
+        {
+          value: "commit",
+          label: isAmend
+            ? "Amend with this message"
+            : "Commit with this message",
+          hint: "",
+        },
         {
           value: "edit",
-          label: "Edit before committing",
+          label: `Edit before ${verb}ting`,
           hint: "Tweak the subject / body",
         },
         {
@@ -304,7 +371,7 @@ async function runPushPrep(opts = {}) {
     handleCancel(action);
 
     if (action === "cancel") {
-      p.cancel("Commit cancelled. Your staged files are still staged.");
+      p.cancel("Cancelled. Your staged files are still staged.");
       process.exit(0);
     }
 
@@ -335,12 +402,63 @@ async function runPushPrep(opts = {}) {
     }
 
     // action === "commit"
-    await commitWithMessage(finalMessage);
-    p.log.success(chalk.green(`Committed: "${finalSubject}"`));
+    if (isAmend) {
+      await amendWithMessage(finalMessage);
+      p.log.success(chalk.green(`Amended: "${finalSubject}"`));
+    } else {
+      await commitWithMessage(finalMessage);
+      p.log.success(chalk.green(`Committed: "${finalSubject}"`));
+    }
     break;
   }
 
-  p.outro(chalk.bold.cyan("🚀 All done! Run git push whenever you're ready."));
+  // ── Optional push ───────────────────────────────────────────────────────────
+  const pushed = await maybePush(opts, isAmend);
+
+  if (pushed) {
+    p.outro(chalk.bold.cyan("🚀 All done! Your commit is pushed."));
+  } else {
+    p.outro(
+      chalk.bold.cyan("🚀 All done! Run git push whenever you're ready."),
+    );
+  }
+}
+
+// ─── Push helper ─────────────────────────────────────────────────────────────
+async function maybePush(opts, isAmend) {
+  let doPush = !!opts.push;
+
+  if (!doPush) {
+    const branch = await getCurrentBranch();
+    const answer = await p.confirm({
+      message: branch ? `Push ${branch} to remote now?` : "Push to remote now?",
+      initialValue: false,
+    });
+    handleCancel(answer);
+    doPush = answer;
+  }
+
+  if (!doPush) return false;
+
+  const spin = p.spinner();
+  spin.start("Pushing to remote...");
+  const res = await pushCurrent();
+
+  if (res.ok) {
+    spin.stop(chalk.green(`Pushed ${res.message} to remote. 🚀`));
+    return true;
+  }
+
+  spin.stop(chalk.yellow("Push failed."));
+  p.log.warn(`Could not push: ${res.message}`);
+  if (isAmend) {
+    p.log.info(
+      chalk.dim(
+        "If this commit was already pushed, amending rewrote history — you'd need 'git push --force-with-lease' manually.",
+      ),
+    );
+  }
+  return false;
 }
 
 // ─── Doctor ──────────────────────────────────────────────────────────────────
@@ -436,6 +554,10 @@ program
     `
 Examples:
   $ pushprep                         Run the full workflow
+  $ pushprep --push                  Run the workflow, then push
+  $ pushprep --amend                 Rewrite the previous commit's message
+  $ pushprep --model gemini-2.0-flash  Use a specific AI model
+  $ pushprep doctor                  Diagnose git / API key / model setup
   $ pushprep config --key API_KEY    Save your Gemini API key
   $ pushprep config --show           Show saved API key (masked)
   $ pushprep config --remove         Delete the saved API key
@@ -446,10 +568,16 @@ Get a free Gemini API key at: https://aistudio.google.com/app/apikey
 
 // Shared flags for the workflow commands (default + `run`).
 function addWorkflowOptions(cmd) {
-  return cmd.option(
-    "-m, --model <name>",
-    "Override the AI model (also settable via PUSHPREP_MODEL)",
-  );
+  return cmd
+    .option(
+      "-m, --model <name>",
+      "Override the AI model (also settable via PUSHPREP_MODEL)",
+    )
+    .option("--push", "Push to the remote after committing (no prompt)")
+    .option(
+      "--amend",
+      "Rewrite the previous commit's message instead of creating a new commit",
+    );
 }
 
 // Default action — run full workflow

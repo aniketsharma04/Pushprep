@@ -41,38 +41,58 @@ Get a free Gemini API key at: **https://aistudio.google.com/app/apikey**
 
 ## Commands
 
-| Command | Description |
-|---|---|
-| `pushprep` | Run the full workflow (default) |
-| `pushprep run` | Explicit alias for the default workflow |
-| `pushprep config --key <key>` | Save or update your Gemini API key |
-| `pushprep config --show` | Display masked API key and config file path |
-| `pushprep config --remove` | Delete the saved API key |
-| `pushprep --version` | Print the installed version |
-| `pushprep --help` | Print usage guide |
+| Command                       | Description                                   |
+| ----------------------------- | --------------------------------------------- |
+| `pushprep`                    | Run the full workflow (default)               |
+| `pushprep run`                | Explicit alias for the default workflow       |
+| `pushprep --push`             | Run the workflow, then push to the remote     |
+| `pushprep --amend`            | Rewrite the previous commit's message         |
+| `pushprep --model <name>`     | Use a specific AI model for this run          |
+| `pushprep doctor`             | Diagnose git, API key, and model reachability |
+| `pushprep config --key <key>` | Save or update your Gemini API key            |
+| `pushprep config --show`      | Display masked API key and config file path   |
+| `pushprep config --remove`    | Delete the saved API key                      |
+| `pushprep --version`          | Print the installed version                   |
+| `pushprep --help`             | Print usage guide                             |
+
+You can also supply the key via the `GEMINI_API_KEY` (or `PUSHPREP_API_KEY`) environment variable — handy for CI — which takes precedence over the saved config.
 
 ---
 
 ## How It Works
 
 ### Phase 1 — Format
+
 Detects all changed files and runs Prettier on each supported file type. Respects any `.prettierrc`, `.prettierrc.json`, or `prettier.config.js` in your project. Files that are already correctly formatted are left untouched.
 
 **Supported extensions:** `.js` `.jsx` `.ts` `.tsx` `.css` `.scss` `.less` `.html` `.vue` `.svelte` `.json` `.yaml` `.yml` `.md` `.mdx` `.graphql` `.gql`
 
 ### Phase 2 — Status
+
 Displays a clear view of unstaged files and already-staged files so you always know exactly what's going on.
 
 ### Phase 3 — Stage
+
 Interactive staging menu:
+
 - **Stage all files** — runs `git add .`
 - **Choose specific files** — multi-select checklist with spacebar to toggle
 - **Skip staging** — use files already in the staging area
 
 ### Phase 4 — AI Commit
-Sends your staged diff to Google Gemini and gets back 3 [Conventional Commit](https://www.conventionalcommits.org) message options. You pick one (or write your own), confirm, and the commit is created.
+
+Sends your staged diff (plus a per-file summary) to Google Gemini and gets back 3 [Conventional Commit](https://www.conventionalcommits.org) message options, each covering your **entire** changeset. All three suggestions are printed in full so you can read them before choosing. You can:
+
+- **Pick one** and commit
+- **🔄 Regenerate** for a fresh set if none fit
+- **Edit** a suggestion inline before committing (pre-filled, so you just tweak)
+- **Write your own** from scratch
 
 If Gemini is unavailable, a local fallback generates 3 context-aware messages from your staged file names.
+
+### Model resilience
+
+pushprep defaults to Google's floating `gemini-flash-latest` alias and keeps a **fallback chain** of known-good models. If a model has been retired for your API key, pushprep transparently tries the next one instead of silently degrading. Run `pushprep doctor` any time to confirm your key and a model are actually reachable.
 
 ---
 
@@ -100,18 +120,19 @@ Valid types: `feat` `fix` `refactor` `chore` `docs` `style` `test` `perf` `ci`
 ## Error Handling
 
 pushprep never crashes with a raw stack trace. Every error:
+
 1. Clearly states what went wrong
 2. Explains why in plain English
 3. Tells you exactly what to do next
 
-| Scenario | Behavior |
-|---|---|
-| Quota exhausted (429) | Shows full quota error block with instructions |
-| Invalid API key | Shows key setup instructions |
-| Network error / timeout | Falls back to local commit messages automatically |
-| Not a git repository | Exits with clear message |
-| Ctrl+C at any prompt | Exits cleanly with "Cancelled." |
-| Prettier fails on a file | Shows warning, continues with other files |
+| Scenario                 | Behavior                                          |
+| ------------------------ | ------------------------------------------------- |
+| Quota exhausted (429)    | Shows full quota error block with instructions    |
+| Invalid API key          | Shows key setup instructions                      |
+| Network error / timeout  | Falls back to local commit messages automatically |
+| Not a git repository     | Exits with clear message                          |
+| Ctrl+C at any prompt     | Exits cleanly with "Cancelled."                   |
+| Prettier fails on a file | Shows warning, continues with other files         |
 
 ---
 

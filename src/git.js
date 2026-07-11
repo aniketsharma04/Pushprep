@@ -41,15 +41,40 @@ export async function getAllChangedFiles() {
  * Returns files currently in the git staging area.
  */
 export async function getStagedFiles() {
+  const { staged } = await getChangeSets();
+  return staged;
+}
+
+/**
+ * Accurately splits the working tree into staged vs unstaged files using the
+ * porcelain per-file codes (index = staged change, working_dir = unstaged
+ * change). This avoids simple-git's convenience arrays, where a staged tracked
+ * file appears in BOTH `modified` and `staged` — which made the status display
+ * list the same file under "Unstaged" and "Already staged" at once.
+ *
+ * A file legitimately appears in both lists only when it has partially staged
+ * changes (some hunks staged, later edits not).
+ *
+ * @returns {Promise<{ staged: string[], unstaged: string[] }>}
+ */
+export async function getChangeSets() {
   const status = await git.status();
-  return [
-    ...status.staged,
-    ...status.created,
-    ...status.renamed.map((r) => r.to),
-  ].filter((f) => {
-    // simple-git stages show as 'index_...' in raw — staged array is reliable
-    return true;
-  });
+  const staged = [];
+  const unstaged = [];
+
+  for (const f of status.files) {
+    const indexCode = f.index; // change staged in the index (' ' = none, '?' = untracked)
+    const workCode = f.working_dir; // change in the working tree ('?' = untracked)
+
+    if (workCode && workCode !== " ") unstaged.push(f.path);
+    if (indexCode && indexCode !== " " && indexCode !== "?")
+      staged.push(f.path);
+  }
+
+  return {
+    staged: [...new Set(staged)],
+    unstaged: [...new Set(unstaged)],
+  };
 }
 
 /**
@@ -89,4 +114,107 @@ export async function getDiffStat() {
  */
 export async function commitWithMessage(message) {
   await git.commit(message);
+}
+
+/**
+ * Amends the previous commit, replacing its message (and folding in any
+ * currently staged changes).
+ * @param {string} message
+ */
+export async function amendWithMessage(message) {
+  await git.commit(message, { "--amend": null });
+}
+
+/**
+ * Returns true if the repo has at least one commit (HEAD resolves).
+ */
+export async function hasCommits() {
+  try {
+    await git.revparse(["HEAD"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns the subject line of the previous (HEAD) commit, or "" if none.
+ */
+export async function getLastCommitMessage() {
+  try {
+    return (await git.raw(["log", "-1", "--pretty=%s"])).trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Returns the diff introduced by the previous commit (HEAD~1..HEAD), used to
+ * regenerate a message when amending. Falls back to the diff of the root commit
+ * when there is no parent.
+ */
+export async function getLastCommitDiff() {
+  try {
+    return await git.diff(["HEAD~1", "HEAD"]);
+  } catch {
+    // Root commit — diff against the empty tree.
+    const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    return await git.diff([EMPTY_TREE, "HEAD"]);
+  }
+}
+
+/**
+ * Returns the list of files touched by the previous (HEAD) commit.
+ */
+export async function getLastCommitFiles() {
+  try {
+    const out = await git.raw([
+      "show",
+      "--name-only",
+      "--pretty=format:",
+      "HEAD",
+    ]);
+    return out
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Returns the current branch name (or "" when detached / unknown).
+ */
+export async function getCurrentBranch() {
+  try {
+    const status = await git.status();
+    return status.current || "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Pushes the current branch to its upstream. If no upstream is set, sets it to
+ * origin/<branch> on the first push. Returns { ok, message }.
+ */
+export async function pushCurrent() {
+  try {
+    const branch = await getCurrentBranch();
+    try {
+      await git.push();
+    } catch (err) {
+      const msg = (err?.message || "").toLowerCase();
+      // No upstream configured yet — establish it against origin.
+      if (msg.includes("no upstream") || msg.includes("set-upstream")) {
+        await git.push(["-u", "origin", branch]);
+      } else {
+        throw err;
+      }
+    }
+    return { ok: true, message: branch };
+  } catch (err) {
+    return { ok: false, message: err?.message || String(err) };
+  }
 }
