@@ -1,16 +1,16 @@
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
+import fs from "fs";
+import path from "path";
+import os from "os";
 
-const CONFIG_DIR = path.join(os.homedir(), '.pushprep');
-const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
+const CONFIG_DIR = path.join(os.homedir(), ".pushprep");
+const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 
 /**
  * Reads the config file. Returns {} on missing or corrupt file.
  */
 function readConfig() {
   try {
-    const raw = fs.readFileSync(CONFIG_FILE, 'utf-8');
+    const raw = fs.readFileSync(CONFIG_FILE, "utf-8");
     return JSON.parse(raw);
   } catch {
     return {};
@@ -24,7 +24,7 @@ function writeConfig(data) {
   if (!fs.existsSync(CONFIG_DIR)) {
     fs.mkdirSync(CONFIG_DIR, { recursive: true });
   }
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2), "utf-8");
 }
 
 /**
@@ -37,9 +37,14 @@ export function saveApiKey(key) {
 }
 
 /**
- * Returns the saved Gemini API key, or null if not set.
+ * Returns the Gemini API key.
+ * Precedence: GEMINI_API_KEY / PUSHPREP_API_KEY env vars (handy for CI and
+ * one-off overrides) take priority over the saved config file. Returns null
+ * if none is set.
  */
 export function getApiKey() {
+  const envKey = process.env.GEMINI_API_KEY || process.env.PUSHPREP_API_KEY;
+  if (envKey && envKey.trim()) return envKey.trim();
   const config = readConfig();
   return config.geminiApiKey || null;
 }
@@ -58,8 +63,8 @@ export function removeApiKey() {
  * e.g. AIzaSy••••••••••••y8Xz
  */
 function maskKey(key) {
-  if (!key || key.length < 12) return '••••••••••••••••';
-  return key.slice(0, 6) + '•'.repeat(key.length - 10) + key.slice(-4);
+  if (!key || key.length < 12) return "••••••••••••••••";
+  return key.slice(0, 6) + "•".repeat(key.length - 10) + key.slice(-4);
 }
 
 /**

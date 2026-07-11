@@ -2,13 +2,25 @@ import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import chalk from "chalk";
 import path from "path";
 
-// Model is overridable via env var for experimentation.
-// Default is the floating "flash-latest" alias: Google keeps it pointed at a
-// current, widely-available Flash model that follows structured-output
-// (responseSchema) contracts. Using the alias (instead of a pinned version like
-// gemini-2.5-flash) means the tool doesn't break when Google retires a specific
-// model version for new API keys.
-const MODEL_NAME = process.env.PUSHPREP_MODEL || "gemini-flash-latest";
+// Default model. The floating "flash-latest" alias keeps pointing at a current,
+// widely-available Flash model that follows structured-output (responseSchema)
+// contracts. Using the alias (instead of a pinned version like gemini-2.5-flash)
+// means the tool doesn't break when Google retires a specific model version for
+// new API keys. Overridable via the --model flag or the PUSHPREP_MODEL env var.
+const DEFAULT_MODEL = "gemini-flash-latest";
+
+// Fallback chain: if the chosen model returns a "model not found / retired"
+// error, we transparently try the next one before giving up. This is the
+// defense against the exact failure that shipped in v1.0 (gemini-2.5-flash was
+// retired for new keys, silently dropping every run to the generic fallback).
+const FALLBACK_MODELS = [
+  "gemini-flash-latest",
+  "gemini-2.0-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash-001",
+];
+
+const DEFAULT_TEMPERATURE = 0.4;
 // Gemini Flash has a very large context window, so we can afford a generous
 // diff budget. A tiny limit was causing multi-file commits to lose files
 // (and get described only partially). Paired with the --stat summary below,
@@ -17,6 +29,33 @@ const DIFF_CHAR_LIMIT = 20000;
 const API_TIMEOUT_MS = 30000;
 const MIN_BODY_LENGTH = 120;
 const DEBUG = process.env.PUSHPREP_DEBUG === "1";
+
+/**
+ * Resolves the ordered list of models to attempt: the caller's explicit choice
+ * (flag) or the PUSHPREP_MODEL env var first, then the fallback chain. Deduped
+ * so a model is never tried twice.
+ * @param {string} [preferred] - explicit model (e.g. from --model)
+ * @returns {string[]}
+ */
+function resolveModelChain(preferred) {
+  const chosen = preferred || process.env.PUSHPREP_MODEL || DEFAULT_MODEL;
+  return [...new Set([chosen, ...FALLBACK_MODELS])];
+}
+
+/**
+ * Classifies an error into a coarse kind used for user-facing messaging.
+ * @returns {"quota"|"invalidKey"|"modelNotFound"|"timeout"|"safety"|"parse"|"network"}
+ */
+function classifyError(status, message) {
+  const msg = (message || "").toLowerCase();
+  if (isQuotaError(status, message)) return "quota";
+  if (isInvalidKeyError(status, message)) return "invalidKey";
+  if (isModelNotFoundError(status, message)) return "modelNotFound";
+  if (message === "timeout") return "timeout";
+  if (msg.includes("safety") || msg.includes("blocked")) return "safety";
+  if (message === "invalid_format") return "parse";
+  return "network";
+}
 
 /**
  * JSON schema passed to Gemini via generationConfig.responseSchema.
@@ -214,162 +253,269 @@ export function generateFallbackMessages(stagedFiles) {
 }
 
 /**
- * Calls Gemini API to generate 3 commit message suggestions.
- * Falls back to local messages on any failure, except quota/key errors
- * which are shown to the user but still end with fallback.
+ * Performs a single Gemini call with one model and parses/validates the result.
+ * Throws on any failure (network, timeout, model-not-found, invalid_format...)
+ * so the caller can decide whether to try the next model in the chain.
+ *
+ * @returns {Promise<{ subject: string, body: string }[]>}
+ */
+async function callModelOnce(modelName, apiKey, prompt, temperature) {
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({
+    model: modelName,
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: COMMIT_RESPONSE_SCHEMA,
+      temperature,
+      // Disable "thinking" for this task: commit-message generation doesn't
+      // need it, and leaving it on roughly doubles latency (25s+ vs ~12s),
+      // which pushes runs past the timeout into the generic fallback.
+      thinkingConfig: { thinkingBudget: 0 },
+    },
+  });
+
+  const result = await Promise.race([
+    model.generateContent(prompt),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("timeout")), API_TIMEOUT_MS),
+    ),
+  ]);
+
+  const text = result.response.text().trim();
+
+  if (DEBUG) {
+    console.log(chalk.magenta("[pushprep:debug] raw response:"));
+    console.log(chalk.dim(text));
+    console.log("");
+  }
+
+  // Strip accidental markdown fences (defense-in-depth; responseSchema
+  // should already prevent these)
+  const cleaned = text
+    .replace(/```json\n?/g, "")
+    .replace(/```\n?/g, "")
+    .trim();
+
+  const parsed = JSON.parse(cleaned);
+
+  if (!Array.isArray(parsed) || parsed.length < 3) {
+    throw new Error("invalid_format");
+  }
+
+  return parsed.slice(0, 3).map((entry) => {
+    // No more silent string-to-object shim. If the model returns plain
+    // strings (drift from the schema) we fail loudly so the user sees
+    // the fallback warning instead of getting empty-body commits.
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      typeof entry.subject !== "string" ||
+      typeof entry.body !== "string"
+    ) {
+      throw new Error("invalid_format");
+    }
+    const subject = entry.subject.trim();
+    // Models often emit the literal characters "\n" (backslash + n) inside the
+    // body instead of a real newline, because the prompt describes line breaks
+    // as "\n". Normalize those to actual newlines so the preview renders on
+    // separate lines and the commit stores a proper multi-line body.
+    const body = entry.body.replace(/\\r\\n|\\n/g, "\n").trim();
+    if (subject.length === 0 || body.length < MIN_BODY_LENGTH) {
+      // Body is too short to be useful — treat as format failure.
+      throw new Error("invalid_format");
+    }
+    return { subject, body };
+  });
+}
+
+/**
+ * Prints the user-facing message for a failed generation, based on error kind.
+ */
+function reportGenerationError(status, message) {
+  switch (classifyError(status, message)) {
+    case "quota":
+      printQuotaError();
+      break;
+    case "invalidKey":
+      printInvalidKeyError();
+      break;
+    case "modelNotFound":
+      console.log(
+        chalk.yellow(
+          "\n  ⚠️  No Gemini model was reachable. Update pushprep to the latest version, or set one with --model.\n",
+        ),
+      );
+      break;
+    case "timeout":
+      console.log(
+        chalk.yellow(
+          "\n  ⚠️  Gemini took too long to respond. Using local fallback messages.\n",
+        ),
+      );
+      break;
+    case "safety":
+      console.log(
+        chalk.yellow(
+          "\n  ⚠️  Gemini blocked the request. Using local fallback messages.\n",
+        ),
+      );
+      break;
+    case "parse":
+      console.log(
+        chalk.yellow(
+          "\n  ⚠️  Could not parse AI response. Using local fallback messages.\n",
+        ),
+      );
+      break;
+    default:
+      console.log(
+        chalk.yellow(
+          `\n  ⚠️  Network error: ${message}. Using local fallback messages.\n`,
+        ),
+      );
+  }
+}
+
+/**
+ * Generates 3 commit message suggestions, trying each model in the fallback
+ * chain until one succeeds. Only "model not found / retired" errors advance to
+ * the next model (a bad key or exhausted quota would fail identically on every
+ * model, so we stop and report those immediately). Falls back to local messages
+ * if the whole chain fails.
  *
  * @param {string} diff - staged git diff
  * @param {string[]} stagedFiles - list of staged file paths
  * @param {string} apiKey - Gemini API key
  * @param {string} [diffStat] - per-file summary (git diff --staged --stat)
- * @returns {Promise<{ messages: { subject: string, body: string }[], usedFallback: boolean }>}
+ * @param {{ model?: string, temperature?: number }} [options]
+ * @returns {Promise<{ messages: { subject: string, body: string }[], usedFallback: boolean, model?: string }>}
  */
 export async function generateCommitMessages(
   diff,
   stagedFiles,
   apiKey,
   diffStat = "",
+  options = {},
 ) {
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: MODEL_NAME,
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: COMMIT_RESPONSE_SCHEMA,
-        temperature: 0.4,
-        // Disable "thinking" for this task: commit-message generation doesn't
-        // need it, and leaving it on roughly doubles latency (25s+ vs ~12s),
-        // which pushes runs past the timeout into the generic fallback.
-        thinkingConfig: { thinkingBudget: 0 },
-      },
-    });
+  const chain = resolveModelChain(options.model);
+  const temperature = options.temperature ?? DEFAULT_TEMPERATURE;
+  const prompt = buildPrompt(diff, stagedFiles, diffStat);
 
-    const prompt = buildPrompt(diff, stagedFiles, diffStat);
+  if (DEBUG) {
+    console.log(
+      chalk.magenta("\n[pushprep:debug] model chain: ") + chain.join(" → "),
+    );
+    console.log(
+      chalk.magenta("[pushprep:debug] prompt length: ") + prompt.length,
+    );
+    console.log(
+      chalk.magenta("[pushprep:debug] diff length: ") +
+        `${diff.length} (truncated to ${Math.min(diff.length, DIFF_CHAR_LIMIT)})`,
+    );
+  }
 
-    if (DEBUG) {
-      console.log(chalk.magenta("\n[pushprep:debug] model: ") + MODEL_NAME);
-      console.log(
-        chalk.magenta("[pushprep:debug] prompt length: ") + prompt.length,
-      );
-      console.log(
-        chalk.magenta("[pushprep:debug] diff length: ") +
-          `${diff.length} (truncated to ${Math.min(diff.length, DIFF_CHAR_LIMIT)})`,
-      );
-    }
-
-    const result = await Promise.race([
-      model.generateContent(prompt),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("timeout")), API_TIMEOUT_MS),
-      ),
-    ]);
-
-    const text = result.response.text().trim();
-
-    if (DEBUG) {
-      console.log(chalk.magenta("[pushprep:debug] raw Gemini response:"));
-      console.log(chalk.dim(text));
-      console.log("");
-    }
-
-    // Strip accidental markdown fences (defense-in-depth; responseSchema
-    // should already prevent these)
-    const cleaned = text
-      .replace(/```json\n?/g, "")
-      .replace(/```\n?/g, "")
-      .trim();
-
-    const parsed = JSON.parse(cleaned);
-
-    if (!Array.isArray(parsed) || parsed.length < 3) {
-      throw new Error("invalid_format");
-    }
-
-    const messages = parsed.slice(0, 3).map((entry) => {
-      // No more silent string-to-object shim. If the model returns plain
-      // strings (drift from the schema) we fail loudly so the user sees
-      // the fallback warning instead of getting empty-body commits.
-      if (
-        !entry ||
-        typeof entry !== "object" ||
-        typeof entry.subject !== "string" ||
-        typeof entry.body !== "string"
-      ) {
-        throw new Error("invalid_format");
-      }
-      const subject = entry.subject.trim();
-      // Models often emit the literal characters "\n" (backslash + n) inside the
-      // body instead of a real newline, because the prompt describes line breaks
-      // as "\n". Normalize those to actual newlines so the preview renders on
-      // separate lines and the commit stores a proper multi-line body.
-      const body = entry.body.replace(/\\r\\n|\\n/g, "\n").trim();
-      if (subject.length === 0 || body.length < MIN_BODY_LENGTH) {
-        // Body is too short to be useful — treat as format failure.
-        throw new Error("invalid_format");
-      }
-      return { subject, body };
-    });
-
-    if (DEBUG) {
-      console.log(chalk.magenta("[pushprep:debug] parsed messages:"));
-      for (const [i, m] of messages.entries()) {
+  let lastError;
+  for (let i = 0; i < chain.length; i++) {
+    const modelName = chain[i];
+    try {
+      if (DEBUG) {
         console.log(
-          chalk.magenta(`  [${i}] `) +
-            m.subject +
-            chalk.dim(` (body: ${m.body.length} chars)`),
+          chalk.magenta("[pushprep:debug] trying model: ") + modelName,
         );
       }
-      console.log("");
+      const messages = await callModelOnce(
+        modelName,
+        apiKey,
+        prompt,
+        temperature,
+      );
+      return { messages, usedFallback: false, model: modelName };
+    } catch (err) {
+      lastError = err;
+      const status = err?.status || err?.response?.status || null;
+      const message = err?.message || err?.toString() || "";
+      const isLast = i === chain.length - 1;
+
+      // Only a retired/unavailable model is worth retrying on a different model;
+      // everything else (bad key, quota, timeout, parse) fails the same way for
+      // every model, so stop and report.
+      if (isModelNotFoundError(status, message) && !isLast) {
+        if (DEBUG) {
+          console.log(
+            chalk.magenta(
+              `[pushprep:debug] ${modelName} unavailable, trying next.`,
+            ),
+          );
+        }
+        continue;
+      }
+      break;
     }
-
-    return { messages, usedFallback: false };
-  } catch (err) {
-    const status = err?.status || err?.response?.status || null;
-    const message = err?.message || err?.toString() || "";
-
-    if (isQuotaError(status, message)) {
-      printQuotaError();
-    } else if (isInvalidKeyError(status, message)) {
-      printInvalidKeyError();
-    } else if (isModelNotFoundError(status, message)) {
-      console.log(
-        chalk.yellow(
-          "\n  ⚠️  Gemini model unavailable. Update pushprep to the latest version.\n",
-        ),
-      );
-    } else if (message === "timeout") {
-      console.log(
-        chalk.yellow(
-          "\n  ⚠️  Gemini took too long to respond. Using local fallback messages.\n",
-        ),
-      );
-    } else if (
-      message.toLowerCase().includes("safety") ||
-      message.toLowerCase().includes("blocked")
-    ) {
-      console.log(
-        chalk.yellow(
-          "\n  ⚠️  Gemini blocked the request. Using local fallback messages.\n",
-        ),
-      );
-    } else if (message === "invalid_format") {
-      console.log(
-        chalk.yellow(
-          "\n  ⚠️  Could not parse AI response. Using local fallback messages.\n",
-        ),
-      );
-    } else {
-      console.log(
-        chalk.yellow(
-          `\n  ⚠️  Network error: ${message}. Using local fallback messages.\n`,
-        ),
-      );
-    }
-
-    return {
-      messages: generateFallbackMessages(stagedFiles),
-      usedFallback: true,
-    };
   }
+
+  const status = lastError?.status || lastError?.response?.status || null;
+  const message = lastError?.message || lastError?.toString() || "";
+  reportGenerationError(status, message);
+
+  return {
+    messages: generateFallbackMessages(stagedFiles),
+    usedFallback: true,
+  };
+}
+
+/**
+ * Lightweight liveness probe used by `pushprep doctor`: tries the model chain
+ * with a trivial prompt and reports whether the key + a model actually work.
+ *
+ * @param {string} apiKey - Gemini API key
+ * @param {string} [preferredModel] - explicit model to try first
+ * @returns {Promise<{ ok: boolean, model: string, kind?: string, message?: string }>}
+ */
+export async function checkModel(apiKey, preferredModel) {
+  const chain = resolveModelChain(preferredModel);
+  let lastError;
+  for (let i = 0; i < chain.length; i++) {
+    const modelName = chain[i];
+    try {
+      // Minimal probe — no responseSchema/body-length rules, so we test
+      // connectivity + auth + model availability, not response quality.
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        generationConfig: {
+          thinkingConfig: { thinkingBudget: 0 },
+          maxOutputTokens: 16,
+        },
+      });
+      const result = await Promise.race([
+        model.generateContent("Reply with the single word: ok"),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("timeout")), API_TIMEOUT_MS),
+        ),
+      ]);
+      result.response.text(); // throws if the response was blocked/empty
+      return { ok: true, model: modelName };
+    } catch (err) {
+      lastError = err;
+      const status = err?.status || err?.response?.status || null;
+      const message = err?.message || err?.toString() || "";
+      if (isModelNotFoundError(status, message) && i < chain.length - 1) {
+        continue;
+      }
+      return {
+        ok: false,
+        model: modelName,
+        kind: classifyError(status, message),
+        message,
+      };
+    }
+  }
+  const status = lastError?.status || lastError?.response?.status || null;
+  const message = lastError?.message || lastError?.toString() || "";
+  return {
+    ok: false,
+    model: chain[chain.length - 1],
+    kind: classifyError(status, message),
+    message,
+  };
 }

@@ -20,7 +20,7 @@ import {
   commitWithMessage,
 } from "./git.js";
 import { formatFiles } from "./formatter.js";
-import { generateCommitMessages } from "./ai.js";
+import { generateCommitMessages, checkModel } from "./ai.js";
 
 // ─── Resolve package version ────────────────────────────────────────────────
 const __filename = fileURLToPath(import.meta.url);
@@ -52,7 +52,7 @@ function handleCancel(value) {
 }
 
 // ─── Main Workflow ───────────────────────────────────────────────────────────
-async function runPushPrep() {
+async function runPushPrep(opts = {}) {
   printBanner();
   p.intro(chalk.bold("Starting your pre-push workflow..."));
 
@@ -198,6 +198,7 @@ async function runPushPrep() {
     staged,
     apiKey,
     diffStat,
+    { model: opts.model },
   );
 
   if (usedFallback) {
@@ -342,6 +343,89 @@ async function runPushPrep() {
   p.outro(chalk.bold.cyan("🚀 All done! Run git push whenever you're ready."));
 }
 
+// ─── Doctor ──────────────────────────────────────────────────────────────────
+function doctorModelFix(r) {
+  switch (r.kind) {
+    case "quota":
+      return "Quota exhausted. Use a new key (pushprep config --key ...) or wait for it to reset.";
+    case "invalidKey":
+      return "API key rejected. Verify it at https://aistudio.google.com/app/apikey, then re-run pushprep config --key.";
+    case "modelNotFound":
+      return "No known model was reachable. Update pushprep, or pass --model with a current model name.";
+    case "timeout":
+      return "The API timed out. Check your internet connection and try again.";
+    default:
+      return `Could not reach the model: ${r.message}`;
+  }
+}
+
+async function runDoctor(opts = {}) {
+  console.log(chalk.bold.cyan("\n  pushprep doctor\n"));
+
+  const results = [];
+
+  // Node.js version
+  const nodeMajor = Number(process.versions.node.split(".")[0]);
+  results.push({
+    ok: nodeMajor >= 18,
+    label: `Node.js ${process.versions.node}`,
+    fix: "pushprep needs Node.js >= 18. Upgrade at https://nodejs.org",
+  });
+
+  // Git repository
+  const inRepo = await isGitRepo();
+  results.push({
+    ok: inRepo,
+    label: inRepo ? "Inside a git repository" : "Not a git repository",
+    fix: "Run pushprep inside a git project (or run git init).",
+  });
+
+  // API key
+  const apiKey = getApiKey();
+  results.push({
+    ok: !!apiKey,
+    label: apiKey ? "Gemini API key found" : "No Gemini API key",
+    fix: "Set one with: pushprep config --key YOUR_GEMINI_API_KEY (or the GEMINI_API_KEY env var).",
+  });
+
+  // Model reachability (only worth checking if a key exists)
+  if (apiKey) {
+    const spin = p.spinner();
+    spin.start("Checking model reachability...");
+    const modelResult = await checkModel(apiKey, opts.model);
+    spin.stop(
+      modelResult.ok
+        ? chalk.green("Model reachable.")
+        : chalk.yellow("Model check failed."),
+    );
+    results.push({
+      ok: modelResult.ok,
+      label: modelResult.ok
+        ? `Model reachable (${modelResult.model})`
+        : `Model unreachable (${modelResult.model})`,
+      fix: doctorModelFix(modelResult),
+    });
+  }
+
+  console.log("");
+  for (const r of results) {
+    const icon = r.ok ? chalk.green("✅") : chalk.red("❌");
+    console.log(`  ${icon}  ${r.label}`);
+    if (!r.ok) console.log(chalk.dim(`      → ${r.fix}`));
+  }
+  console.log("");
+
+  if (results.every((r) => r.ok)) {
+    console.log(
+      chalk.green.bold("  All checks passed — pushprep is ready. 🚀\n"),
+    );
+    process.exit(0);
+  } else {
+    console.log(chalk.yellow("  Some checks failed — see the fixes above.\n"));
+    process.exit(1);
+  }
+}
+
 // ─── Commander Setup ─────────────────────────────────────────────────────────
 program
   .name("pushprep")
@@ -360,14 +444,28 @@ Get a free Gemini API key at: https://aistudio.google.com/app/apikey
 `,
   );
 
+// Shared flags for the workflow commands (default + `run`).
+function addWorkflowOptions(cmd) {
+  return cmd.option(
+    "-m, --model <name>",
+    "Override the AI model (also settable via PUSHPREP_MODEL)",
+  );
+}
+
 // Default action — run full workflow
-program.action(runPushPrep);
+addWorkflowOptions(program).action((opts) => runPushPrep(opts));
 
 // Explicit alias: pushprep run
+addWorkflowOptions(
+  program.command("run").description("Explicit alias — runs the full workflow"),
+).action((opts) => runPushPrep(opts));
+
+// pushprep doctor — diagnose setup problems
 program
-  .command("run")
-  .description("Explicit alias — runs the full workflow")
-  .action(runPushPrep);
+  .command("doctor")
+  .description("Check your environment: git, API key, and model reachability")
+  .option("-m, --model <name>", "Model to test reachability against")
+  .action((opts) => runDoctor(opts));
 
 // pushprep config
 const configCmd = program
