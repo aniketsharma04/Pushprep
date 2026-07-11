@@ -29,7 +29,7 @@ const SUPPORTED_EXTENSIONS = new Set([
  * Returns the lowercase extension of a file path.
  * @param {string} filePath
  */
-function getExtension(filePath) {
+export function getExtension(filePath) {
   const idx = filePath.lastIndexOf(".");
   if (idx === -1) return "";
   return filePath.slice(idx).toLowerCase();

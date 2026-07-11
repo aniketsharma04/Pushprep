@@ -46,7 +46,7 @@ function resolveModelChain(preferred) {
  * Classifies an error into a coarse kind used for user-facing messaging.
  * @returns {"quota"|"invalidKey"|"modelNotFound"|"timeout"|"safety"|"parse"|"network"}
  */
-function classifyError(status, message) {
+export function classifyError(status, message) {
   const msg = (message || "").toLowerCase();
   if (isQuotaError(status, message)) return "quota";
   if (isInvalidKeyError(status, message)) return "invalidKey";
@@ -143,7 +143,7 @@ Reminder: return ONLY the JSON array of 3 {subject, body} objects. Each body mus
  * Detects if an error is a quota/rate-limit error.
  * Per PRD §5.4
  */
-function isQuotaError(status, message) {
+export function isQuotaError(status, message) {
   const msg = message?.toLowerCase() || "";
   return (
     status === 429 ||
@@ -159,7 +159,7 @@ function isQuotaError(status, message) {
  * Detects if an error is a model-not-found error.
  * Per PRD §5.2
  */
-function isModelNotFoundError(status, message) {
+export function isModelNotFoundError(status, message) {
   const msg = message?.toLowerCase() || "";
   return (
     status === 404 ||
@@ -173,7 +173,7 @@ function isModelNotFoundError(status, message) {
  * Detects if an error is an invalid API key error.
  * Per PRD §5.4
  */
-function isInvalidKeyError(status, message) {
+export function isInvalidKeyError(status, message) {
   const msg = message?.toLowerCase() || "";
   return (
     status === 400 ||
