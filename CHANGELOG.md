@@ -18,19 +18,37 @@ machine. This release also folds in a small set of subtle, one-line UI tips.
   fast, cheap default model (`gemini-flash-latest`, `claude-haiku-4-5`,
   `gpt-4o-mini`, `llama3.2`).
 - **`pushprep setup`** — an interactive wizard to pick a provider and add its key.
-  The same one-question setup is offered inline the first time a run finds no key.
+  The wizard shows each provider's key-generation link inline and lets you set a
+  model. The same one-question setup is offered inline the first time a run finds
+  no key, and it's also reachable as `pushprep --config`.
+- **Automatic self-update** — a global install checks for a newer published
+  version (cached, non-blocking, 3s timeout) and, when one exists, installs it
+  and relaunches the same command on the new version. Best-effort and silent:
+  offline, lack of permissions, dev checkouts, and CI all fall through to the
+  current version. Opt out with `PUSHPREP_NO_UPDATE=1`.
 - **`--provider <name>` flag** and **`PUSHPREP_PROVIDER`** env var to select the
   provider per run.
 - **Per-provider keys and models** — `pushprep config --provider <name> --key ...`
   / `--model ...` store settings independently for each provider.
+- **Cross-provider fallback** — if the active provider fails (quota/limit,
+  rejected key, network), pushprep automatically switches to another provider you
+  have a key for, showing a message like "OpenAI reached its limit — switching to
+  Google Gemini." Local fallback messages are only used when every configured
+  provider is exhausted, so a commit still gets a real AI message far more often.
 - **`pushprep config --show`** now lists every provider with its key status,
   saved model, and which one is active.
 - **Ollama support** — runs entirely locally with no API key; `doctor` checks the
   server is up and the chosen model is pulled, with an actionable "pull it"
   message when it isn't.
 - **Subtle one-line tips** at key moments (e.g. "space to select · enter to
-  confirm"). Dim, never more than one line; turn them off with
+  confirm") plus a gentle "run `pushprep --help`" nudge at the start of and
+  during a run. Dim, never more than one line; turn them off with
   `pushprep config --tips off` or `PUSHPREP_TIPS=0`.
+- **Curated `pushprep --help`** — a hand-written "Commands" section listing the
+  everyday commands (workflow, `--push`, `--amend`, `--provider`, `--model`,
+  `setup`, `doctor`, and the `config --show/--provider/--model/--key` family)
+  instead of an auto-generated subcommand dump. `config --show` also now
+  prints the active model on its own line.
 - Provider-specific env vars for keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`
   (alongside the existing `GEMINI_API_KEY`), plus `PUSHPREP_API_KEY` as a
   universal fallback.
