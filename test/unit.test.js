@@ -10,6 +10,7 @@ import {
 } from "../src/ai.js";
 import { getExtension } from "../src/formatter.js";
 import { getApiKey } from "../src/config.js";
+import { isNewer } from "../src/update.js";
 
 // ─── ai.js: fallback messages ────────────────────────────────────────────────
 test("generateFallbackMessages returns 3 well-formed {subject, body} objects", () => {
@@ -55,6 +56,26 @@ test("isInvalidKeyError detects auth failures", () => {
   assert.ok(!isInvalidKeyError(200, "ok"));
 });
 
+test("a bare 400 is a bad request, not a bad key", () => {
+  // Gemini answers 400 INVALID_ARGUMENT for an unsupported generationConfig
+  // field. Calling that an invalid key sent users to rotate a working key.
+  const invalidArgument = "Request contains an invalid argument.";
+  assert.ok(!isInvalidKeyError(400, invalidArgument));
+  assert.equal(classifyError(400, invalidArgument), "badRequest");
+  // A 400 that really is about the key still classifies as one.
+  assert.equal(classifyError(400, "API key not valid"), "invalidKey");
+});
+
+test("retired models classify as modelNotFound", () => {
+  assert.equal(
+    classifyError(
+      404,
+      "This model models/gemini-2.5-flash is no longer available to new users.",
+    ),
+    "modelNotFound",
+  );
+});
+
 test("classifyError maps errors to the right kind", () => {
   assert.equal(classifyError(429, ""), "quota");
   assert.equal(classifyError(401, ""), "invalidKey");
@@ -71,6 +92,16 @@ test("getExtension returns the lowercase extension", () => {
   assert.equal(getExtension("styles/main.css"), ".css");
   assert.equal(getExtension("README"), "");
   assert.equal(getExtension("a/b.min.js"), ".js");
+});
+
+// ─── update.js: version comparison ───────────────────────────────────────────
+test("isNewer detects a strictly higher x.y.z version", () => {
+  assert.ok(isNewer("1.2.0", "1.2.1"));
+  assert.ok(isNewer("1.2.0", "1.3.0"));
+  assert.ok(isNewer("1.2.0", "2.0.0"));
+  assert.ok(!isNewer("1.2.0", "1.2.0")); // equal → not newer
+  assert.ok(!isNewer("1.2.0", "1.1.9")); // lower → not newer
+  assert.ok(!isNewer("1.2.0", undefined)); // missing → safe false
 });
 
 // ─── config.js: env-var precedence ───────────────────────────────────────────

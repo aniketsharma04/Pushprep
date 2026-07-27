@@ -1,4 +1,5 @@
 import simpleGit from "simple-git";
+import { execFileSync } from "child_process";
 
 const git = simpleGit();
 
@@ -90,6 +91,29 @@ export async function stageAllFiles() {
  */
 export async function stageSpecificFiles(files) {
   await git.add(files);
+}
+
+/**
+ * Synchronously unstages exactly the given files — used to undo the staging
+ * pushprep did this run when the user aborts (Ctrl+C) or picks "revert". Runs
+ * synchronously (via execFileSync) so it can complete inside a Ctrl+C / SIGINT
+ * handler before the process exits — an async simple-git call would be cut off
+ * by process.exit().
+ *
+ * Only the listed paths are unstaged (`git reset -- <paths>`), so any files the
+ * user had staged before running pushprep — and that pushprep never touched —
+ * stay staged. Working-tree contents are never modified. Best-effort: any
+ * failure is swallowed so a cancel never turns into a crash.
+ *
+ * @param {string[]} files - files pushprep staged this run
+ */
+export function unstageFilesSync(files = []) {
+  if (!files.length) return;
+  try {
+    execFileSync("git", ["reset", "-q", "--", ...files], { stdio: "ignore" });
+  } catch {
+    // Never let cleanup crash the exit path.
+  }
 }
 
 /**

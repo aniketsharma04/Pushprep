@@ -15,7 +15,7 @@ machine. This release also folds in a small set of subtle, one-line UI tips.
 
 - **Multi-provider support** — choose between **Google Gemini** (default),
   **Anthropic Claude**, **OpenAI**, and **Ollama** (local, no key). Each uses a
-  fast, cheap default model (`gemini-flash-latest`, `claude-haiku-4-5`,
+  fast, cheap default model (`gemini-flash-lite-latest`, `claude-haiku-4-5`,
   `gpt-4o-mini`, `llama3.2`).
 - **`pushprep setup`** — an interactive wizard to pick a provider and add its key.
   The wizard shows each provider's key-generation link inline and lets you set a
@@ -49,6 +49,15 @@ machine. This release also folds in a small set of subtle, one-line UI tips.
   `setup`, `doctor`, and the `config --show/--provider/--model/--key` family)
   instead of an auto-generated subcommand dump. `config --show` also now
   prints the active model on its own line.
+- **Safe cancel** — pressing **Ctrl+C or Esc** anywhere before the commit is made
+  now unstages exactly the files pushprep staged this run, so an aborted run no
+  longer silently leaves that work staged. Files you had staged before running
+  pushprep (that it didn't touch) are left alone, and working-tree contents are
+  never modified. (A future release will make Esc step _back_ one prompt at a
+  time instead of exiting outright.)
+- **"Don't commit — exit" option** in the commit-message menu, for stopping
+  cleanly without committing. When pushprep staged files this run it asks whether
+  to keep them staged (default yes) or revert.
 - Provider-specific env vars for keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`
   (alongside the existing `GEMINI_API_KEY`), plus `PUSHPREP_API_KEY` as a
   universal fallback.
@@ -63,6 +72,41 @@ machine. This release also folds in a small set of subtle, one-line UI tips.
 - The config file gained a versioned multi-provider schema; existing single-key
   configs are migrated automatically on first write. Existing installs keep
   working with no action needed.
+
+### Fixed
+
+- **A valid API key was reported as invalid.** Any `400` from a provider was
+  classified as a rejected key, so pushprep printed "🔑 Invalid Gemini API Key"
+  and fell back to generic local messages — sending users to rotate a key that
+  was working fine. Gemini returns `400 INVALID_ARGUMENT` for any malformed
+  request, and pushprep was sending one (below). A bad key is now only inferred
+  from `401`/`403` or an explicit "API key not valid" message; a genuine `400`
+  reports as "the model rejected the request — not your API key".
+- **The request Gemini was rejecting.** pushprep sent
+  `thinkingConfig: { thinkingBudget: 0 }` to disable reasoning tokens, but the
+  current `gemini-flash-latest` and `gemini-flash-lite-latest` endpoints reject
+  that field outright. It's now sent only to thinking-capable models, and a model
+  that rejects it anyway is retried once without it.
+- **Retired models in the fallback chain.** `gemini-2.5-flash-lite` and
+  `gemini-2.5-flash` now return _"no longer available to new users"_ for keys
+  created recently. They're out of the chain, and that wording is recognized as a
+  retired model.
+- **A single exhausted model no longer ends the run.** Gemini's free-tier quota
+  is counted per model, so a `429` on one left three working models untried.
+  Quota and bad-request failures now advance down the model chain the same way a
+  retired model does — in both generation and `pushprep doctor`, which had been
+  able to declare a healthy key dead on the first model it tried.
+
+### Changed
+
+- **Default Gemini model is now `gemini-flash-lite-latest`** (was
+  `gemini-flash-latest`). Flash-Lite does no "thinking", so it spends no
+  reasoning tokens on a task that doesn't need them: a commit that previously
+  cost ~20 thinking tokens per call on top of the output now costs none, and a
+  free-tier key stretches considerably further. Generation measures ~2.5s.
+- **Diff budget trimmed from 20,000 to 12,000 characters**, and generation capped
+  at 1,200 output tokens. The complete file list and `--stat` summary are still
+  sent in full, so every file is still accounted for in the message.
 
 ### Security
 

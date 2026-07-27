@@ -6,14 +6,29 @@ import chalk from "chalk";
 import { fileURLToPath } from "url";
 import path from "path";
 import fs from "fs";
+import readline from "readline";
 
-import { saveApiKey, getApiKey, removeApiKey, showConfig } from "./config.js";
+import {
+  getActiveProviderId,
+  setActiveProvider,
+  resolveKey,
+  getStoredKey,
+  saveProviderKey,
+  removeProviderKey,
+  getStoredModel,
+  setStoredModel,
+  getTipsEnabled,
+  setTipsEnabled,
+  getConfigSummary,
+  maskKey,
+} from "./config.js";
 import {
   isGitRepo,
   getAllChangedFiles,
   getChangeSets,
   stageAllFiles,
   stageSpecificFiles,
+  unstageFilesSync,
   getStagedFiles,
   getDiff,
   getDiffStat,
@@ -27,7 +42,14 @@ import {
   pushCurrent,
 } from "./git.js";
 import { formatFiles } from "./formatter.js";
-import { generateCommitMessages, checkModel } from "./ai.js";
+import {
+  generateCommitMessages,
+  checkModel,
+  getProvider,
+  listProviders,
+  DEFAULT_PROVIDER,
+} from "./ai.js";
+import { maybeAutoUpdate } from "./update.js";
 
 // ─── Resolve package version ────────────────────────────────────────────────
 const __filename = fileURLToPath(import.meta.url);
@@ -50,20 +72,301 @@ function printBanner() {
   console.log(chalk.dim("  Format → Stage → AI Commit. All in one command.\n"));
 }
 
+// ─── Staging rollback ────────────────────────────────────────────────────────
+// If pushprep stages files this run and the user then bails out abruptly
+// (Ctrl+C anywhere before the commit is made), we undo that staging — an aborted
+// run shouldn't silently leave the work it staged behind. We unstage exactly the
+// files pushprep staged this run, so anything the user had staged beforehand and
+// pushprep never touched is left alone. `stagedThisRun` holds those files while
+// armed, and is null when there's nothing to undo (nothing staged yet, or
+// already committed / deliberately kept).
+let stagedThisRun = null;
+
+function armStagingRollback(files) {
+  stagedThisRun = Array.isArray(files) ? files.slice() : null;
+}
+
+function disarmStagingRollback() {
+  stagedThisRun = null;
+}
+
+/**
+ * Unstages exactly the files pushprep staged this run. Idempotent — the list is
+ * cleared once used, so multiple cancel handlers firing for one exit never run
+ * it twice. Returns the number of files reverted (0 if nothing was armed).
+ */
+function runStagingRollback() {
+  if (!stagedThisRun || stagedThisRun.length === 0) {
+    stagedThisRun = null;
+    return 0;
+  }
+  const files = stagedThisRun;
+  stagedThisRun = null;
+  unstageFilesSync(files);
+  return files.length;
+}
+
 // ─── Cancel helper ───────────────────────────────────────────────────────────
+// Handles clack's Ctrl+C during a prompt (which resolves to a cancel symbol
+// rather than raising SIGINT). Reverts this run's staging first so an abrupt
+// cancel leaves the repo as pushprep found it.
 function handleCancel(value) {
   if (p.isCancel(value)) {
-    p.cancel("Cancelled.");
+    const n = runStagingRollback();
+    p.cancel(
+      n ? `Cancelled. Unstaged ${n} file(s) staged this run.` : "Cancelled.",
+    );
     process.exit(0);
   }
+}
+
+// Ctrl+C anywhere other than an interactive prompt needs two nets:
+//   • SIGINT — fires when the terminal is in cooked mode (e.g. between prompts).
+//   • 'exit' — the bulletproof backstop. Ctrl+C during a clack spinner is caught
+//     by clack's block() in RAW mode, which calls process.exit(0) directly and
+//     never raises SIGINT. process.exit always fires 'exit', so the rollback
+//     (synchronous, via execFileSync) runs there too. Idempotent with the others.
+// Registered lazily from runPushPrep so setup/doctor/config are unaffected.
+let cancelHandlersInstalled = false;
+function installCancelHandlers() {
+  if (cancelHandlersInstalled) return;
+  cancelHandlersInstalled = true;
+
+  process.on("SIGINT", () => {
+    const n = runStagingRollback();
+    console.log(
+      n
+        ? chalk.yellow(`\n  Cancelled. Unstaged ${n} file(s) staged this run.`)
+        : chalk.dim("\n  Cancelled."),
+    );
+    process.exit(130);
+  });
+
+  process.on("exit", () => {
+    const n = runStagingRollback();
+    if (n) {
+      process.stdout.write(
+        chalk.yellow(`  Unstaged ${n} file(s) staged this run.\n`),
+      );
+    }
+  });
+
+  // ESC anywhere before the commit cancels the run, mirroring Ctrl+C: stop and
+  // unstage exactly what pushprep staged this run. clack only treats Ctrl+C as a
+  // cancel and ignores ESC entirely, so we listen for the escape keypress
+  // ourselves. (A future release will make ESC step *back* one prompt at a time
+  // instead of exiting outright.) TTY-only — there are no keypresses to read
+  // when input is piped. unref() so this listener never keeps the process alive
+  // after a successful run (which otherwise exits naturally at the end).
+  if (process.stdin.isTTY) {
+    readline.emitKeypressEvents(process.stdin);
+    process.stdin.on("keypress", (_str, key) => {
+      if (key && key.name === "escape") {
+        const n = runStagingRollback();
+        console.log(
+          n
+            ? chalk.yellow(
+                `\n  Cancelled. Unstaged ${n} file(s) staged this run.`,
+              )
+            : chalk.dim("\n  Cancelled."),
+        );
+        process.exit(0);
+      }
+    });
+    process.stdin.unref();
+  }
+}
+
+// Deliberate "Don't commit — exit" path from the commit menu. When pushprep
+// staged files this run, ask whether to keep them staged (default yes, the usual
+// intent) or unstage them. When pushprep staged nothing (the user picked "Skip
+// staging"), there's nothing of ours to undo, so just exit.
+async function exitWithoutCommitting() {
+  if (stagedThisRun && stagedThisRun.length) {
+    const keep = await p.confirm({
+      message: "Keep the files staged?",
+      initialValue: true,
+    });
+    handleCancel(keep); // Ctrl+C here still reverts, via the armed rollback
+    if (keep) {
+      disarmStagingRollback();
+      p.outro(
+        chalk.cyan("Exited without committing. Your files are still staged."),
+      );
+    } else {
+      const n = runStagingRollback();
+      p.outro(chalk.cyan(`Exited without committing. Unstaged ${n} file(s).`));
+    }
+  } else {
+    p.outro(
+      chalk.cyan("Exited without committing. Your files are still staged."),
+    );
+  }
+  process.exit(0);
+}
+
+// ─── Subtle one-line tips ────────────────────────────────────────────────────
+// Dim, single-line, shown only at key moments. Off via `pushprep config
+// --tips off` or PUSHPREP_TIPS=0 so they never become noise.
+function tip(message) {
+  if (getTipsEnabled()) {
+    console.log(chalk.dim(`  💡 ${message}`));
+  }
+}
+
+// ─── Provider resolution ─────────────────────────────────────────────────────
+// The active provider is: --provider flag > saved config > Gemini default.
+function resolveProviderId(opts = {}) {
+  const flag = opts.provider && String(opts.provider).trim().toLowerCase();
+  return flag || getActiveProviderId() || DEFAULT_PROVIDER;
+}
+
+function resolveProvider(opts = {}) {
+  return getProvider(resolveProviderId(opts));
+}
+
+/** Resolves a provider's key from its env vars, then the saved config. */
+function keyForProvider(provider) {
+  return resolveKey(provider.envKeys, provider.id);
+}
+
+// Ordered providers to try for one generation: the active provider first, then
+// every OTHER key-based provider the user has a key for. This is what powers
+// cross-provider fallback — if the active one hits its limit, pushprep moves to
+// the next configured API instead of dropping to generic messages. Keyless
+// providers (Ollama) join only when they're the active choice, never as an
+// automatic fallback.
+function buildProviderChain(active) {
+  const others = listProviders().filter(
+    (pr) =>
+      pr.id !== active.id && pr.needsKey && !!resolveKey(pr.envKeys, pr.id),
+  );
+  return [active, ...others];
+}
+
+// ─── First-run / setup wizard ────────────────────────────────────────────────
+// Interactive: pick a provider, drop in a key (unless it's keyless like Ollama),
+// and save it as the active provider. Reused by `pushprep config` (no args) and
+// auto-offered when a run finds no key.
+async function runSetup() {
+  p.intro(chalk.bold("pushprep setup"));
+
+  // Provider picker — each option shows where to get that provider's key (or
+  // that it's a keyless local one) right in the list, so you can go generate a
+  // key without leaving the wizard.
+  const currentId = getActiveProviderId();
+  const providerChoice = await p.select({
+    message: "Which AI provider do you want to use?",
+    initialValue: currentId || DEFAULT_PROVIDER,
+    options: listProviders().map((prov) => ({
+      value: prov.id,
+      label: prov.recommended
+        ? `${prov.label} ${chalk.green("(Recommended)")}`
+        : prov.label,
+      hint: prov.needsKey
+        ? `get a key: ${prov.keyUrl}`
+        : "local · no key needed",
+    })),
+  });
+  handleCancel(providerChoice);
+
+  const provider = getProvider(providerChoice);
+  setActiveProvider(provider.id);
+
+  if (provider.needsKey) {
+    // Show the key-generation link prominently before asking for the key.
+    if (provider.keyUrl) {
+      p.note(
+        `Generate a ${provider.label} API key here, then paste it below:\n${chalk.cyan(provider.keyUrl)}`,
+        "🔑 Get your API key",
+      );
+    }
+    const existing = getStoredKey(provider.id);
+    const key = await p.password({
+      message: existing
+        ? `${provider.label} API key (press enter to keep the saved one):`
+        : `Paste your ${provider.label} API key:`,
+      validate(value) {
+        if (!value && existing) return; // keep existing
+        if (!value || value.trim().length < 8)
+          return "That key looks too short.";
+      },
+    });
+    handleCancel(key);
+    if (key && key.trim()) {
+      saveProviderKey(provider.id, key.trim());
+    }
+    tip("Keys are stored locally in ~/.pushprep/config.json — never uploaded.");
+  }
+
+  // Optional model choice — every provider has a sensible default; press enter
+  // to accept it, or type a specific model name.
+  const currentModel = getStoredModel(provider.id);
+  const modelAnswer = await p.text({
+    message: `Model to use (enter for the default):`,
+    placeholder: provider.defaultModel,
+    initialValue: currentModel || "",
+    defaultValue: "",
+  });
+  handleCancel(modelAnswer);
+  if (modelAnswer && modelAnswer.trim()) {
+    setStoredModel(provider.id, modelAnswer.trim());
+  }
+
+  // Keyless (Ollama): confirm the server is up and the chosen model is pulled,
+  // so setup fails loudly now instead of at commit time.
+  if (!provider.needsKey) {
+    const spin = p.spinner();
+    spin.start(`Checking ${provider.label}...`);
+    const res = await provider.check({ model: getStoredModel(provider.id) });
+    if (res.ok) {
+      spin.stop(chalk.green(`${provider.label} reachable (${res.model}).`));
+    } else {
+      spin.stop(chalk.yellow(`${provider.label}: ${res.message}`));
+    }
+  }
+
+  const activeModel = getStoredModel(provider.id) || provider.defaultModel;
+  p.outro(
+    chalk.green(
+      `✅ Using ${provider.label} (${activeModel}). Run ${chalk.cyan("pushprep")} to get started.`,
+    ),
+  );
+}
+
+// ─── Auto-update gate ────────────────────────────────────────────────────────
+// Best-effort: keeps a global install current, then re-execs onto the new
+// version. A no-op (and instant) for dev checkouts, CI, when up to date, or when
+// PUSHPREP_NO_UPDATE=1. Never throws.
+async function autoUpdateGate() {
+  const spin = p.spinner();
+  let spinning = false;
+  await maybeAutoUpdate(pkg.version, ({ phase, version }) => {
+    if (phase === "start") {
+      spin.start(`Updating pushprep to v${version}...`);
+      spinning = true;
+    } else if (phase === "done") {
+      spin.stop(chalk.green(`Updated to v${version} — relaunching...`));
+    } else if (phase === "fail" && spinning) {
+      spin.stop(
+        chalk.yellow("Auto-update unavailable — continuing on this version."),
+      );
+    }
+  });
 }
 
 // ─── Main Workflow ───────────────────────────────────────────────────────────
 async function runPushPrep(opts = {}) {
   const isAmend = !!opts.amend;
 
+  // Self-update before doing any work, so this run uses the newest version.
+  await autoUpdateGate();
+
   printBanner();
   p.intro(chalk.bold("Starting your pre-push workflow..."));
+  tip(
+    `New to pushprep? Run ${chalk.cyan("pushprep --help")} to see every command.`,
+  );
 
   // ── Guard: must be inside a git repo ──────────────────────────────────────
   const inRepo = await isGitRepo();
@@ -72,17 +375,42 @@ async function runPushPrep(opts = {}) {
     process.exit(1);
   }
 
-  // ── Guard: must have an API key ────────────────────────────────────────────
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    p.log.error(
-      "No Gemini API key found.\n\n" +
-        "  Run the following command to set it up:\n" +
-        chalk.cyan("    pushprep config --key YOUR_GEMINI_API_KEY") +
-        "\n\n  Get a free key at: " +
-        chalk.cyan("https://aistudio.google.com/app/apikey"),
-    );
-    process.exit(1);
+  // Catch every abrupt-exit path (prompt cancel, SIGINT, spinner Ctrl+C) so any
+  // staging we do this run is rolled back rather than silently left behind.
+  installCancelHandlers();
+
+  // ── Resolve the active AI provider + key ──────────────────────────────────
+  const provider = resolveProvider(opts);
+  let apiKey = keyForProvider(provider);
+
+  // Keyless providers (Ollama) skip this entirely. Otherwise, if no key is set,
+  // offer an inline one-question setup rather than dumping instructions.
+  if (provider.needsKey && !apiKey) {
+    p.log.warn(`No ${provider.label} API key found.`);
+    const setupNow = await p.confirm({
+      message: `Add your ${provider.label} key now?`,
+      initialValue: true,
+    });
+    handleCancel(setupNow);
+    if (!setupNow) {
+      p.log.info(
+        chalk.dim(
+          `Run ${chalk.cyan("pushprep config")} to pick a provider and add a key.`,
+        ),
+      );
+      process.exit(1);
+    }
+    const key = await p.password({
+      message: `Paste your ${provider.label} API key:`,
+      validate(v) {
+        if (!v || v.trim().length < 8) return "That key looks too short.";
+      },
+    });
+    handleCancel(key);
+    apiKey = key.trim();
+    saveProviderKey(provider.id, apiKey);
+    setActiveProvider(provider.id);
+    if (provider.keyUrl) tip(`Manage your key any time at ${provider.keyUrl}`);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -172,10 +500,14 @@ async function runPushPrep(opts = {}) {
 
     if (stagingChoice === "all") {
       await stageAllFiles();
+      // Arm rollback: an abrupt cancel / revert unstages exactly the files this
+      // run staged (every previously-unstaged file).
+      armStagingRollback(unstaged);
       p.log.success(chalk.green("All files staged (git add .)"));
     } else if (stagingChoice === "specific") {
       const fileOptions = unstaged.map((f) => ({ value: f, label: f }));
 
+      tip("space to select · a to toggle all · enter to confirm");
       const chosen = await p.multiselect({
         message: "Select files to stage:",
         options: fileOptions,
@@ -184,6 +516,7 @@ async function runPushPrep(opts = {}) {
       handleCancel(chosen);
 
       await stageSpecificFiles(chosen);
+      armStagingRollback(chosen);
       p.log.success(chalk.green(`Staged ${chosen.length} file(s)`));
     } else {
       p.log.info(chalk.dim("Skipping staging — using already staged files."));
@@ -227,33 +560,78 @@ async function runPushPrep(opts = {}) {
   const diffStat = await getDiffStat();
 
   // Generation + selection loop — supports 🔄 Regenerate for fresh suggestions.
+  // The provider chain enables cross-provider fallback: if the active provider
+  // fails, pushprep auto-switches to another configured provider, only using
+  // local messages when every one is exhausted.
+  const preferredModel =
+    opts.model ||
+    process.env.PUSHPREP_MODEL ||
+    getStoredModel(provider.id) ||
+    undefined;
+  const genChain = buildProviderChain(provider).map((pr) => ({
+    id: pr.id,
+    apiKey: pr.needsKey ? keyForProvider(pr) : null,
+    model:
+      (pr.id === provider.id ? preferredModel : undefined) ||
+      getStoredModel(pr.id) ||
+      undefined,
+  }));
   let finalSubject;
   let finalBody;
   let attempt = 0;
 
   while (finalSubject === undefined) {
+    if (attempt === 0) {
+      tip(
+        `While that runs — ${chalk.cyan("pushprep --help")} lists every command & flag.`,
+      );
+    }
     const aiSpinner = p.spinner();
     aiSpinner.start(
       attempt === 0
-        ? "Asking Gemini AI to generate commit messages..."
+        ? `Asking ${provider.label} to generate commit messages...`
         : "Regenerating commit messages...",
     );
 
-    const { messages, usedFallback } = await generateCommitMessages(
-      diff,
-      filesForPrompt,
-      apiKey,
-      diffStat,
-      {
-        model: opts.model,
-        // Nudge the temperature up on regenerate so fresh options differ.
-        temperature: attempt === 0 ? undefined : 0.7,
+    const switched = [];
+    const {
+      messages,
+      usedFallback,
+      provider: usedProviderId,
+    } = await generateCommitMessages(diff, filesForPrompt, diffStat, {
+      chain: genChain,
+      // Nudge the temperature up on regenerate so fresh options differ.
+      temperature: attempt === 0 ? undefined : 0.7,
+      onSwitch: ({ from, to, kind }) => {
+        switched.push({ from, to });
+        const why =
+          kind === "quota"
+            ? "reached its limit"
+            : kind === "invalidKey"
+              ? "key was rejected"
+              : "was unavailable";
+        // Update the live spinner so the switch is visible as it happens.
+        aiSpinner.message(`${from.label} ${why} — switching to ${to.label}...`);
       },
-    );
+    });
     attempt++;
 
+    const usedProvider = getProvider(usedProviderId);
     if (usedFallback) {
       aiSpinner.stop(chalk.yellow("Using local fallback commit messages."));
+      tip("Run 'pushprep doctor' to check your AI setup.");
+    } else if (switched.length > 0) {
+      aiSpinner.stop(
+        chalk.green(`Got 3 suggestions from ${usedProvider.label}. ✨`),
+      );
+      p.log.info(
+        chalk.yellow(
+          `${switched[0].from.label} was unavailable — used ${usedProvider.label} instead.`,
+        ),
+      );
+      tip(
+        `Make ${usedProvider.label} your default: pushprep config --provider ${usedProviderId}`,
+      );
     } else {
       aiSpinner.stop(chalk.green("Got 3 commit message suggestions! ✨"));
     }
@@ -287,6 +665,11 @@ async function runPushPrep(opts = {}) {
       label: "✏️  Write my own commit message",
       hint: "",
     });
+    commitOptions.push({
+      value: "__exit__",
+      label: "🚪 Don't commit — exit",
+      hint: "Stop here without committing",
+    });
 
     const chosen = await p.select({
       message: "Choose your commit message (full text shown above):",
@@ -296,6 +679,15 @@ async function runPushPrep(opts = {}) {
 
     if (chosen === "__regenerate__") {
       continue; // loop and generate a fresh set
+    }
+
+    if (chosen === "__exit__") {
+      // Deliberate "I don't want to commit" exit. Unlike an abrupt Ctrl+C, the
+      // user is choosing to stop, so we let them decide the staged files' fate —
+      // defaulting to keeping them (that's usually the intent). Only ask when
+      // pushprep actually staged something this run.
+      await exitWithoutCommitting();
+      // exitWithoutCommitting() always exits the process.
     }
 
     if (chosen === "__custom__") {
@@ -371,6 +763,9 @@ async function runPushPrep(opts = {}) {
     handleCancel(action);
 
     if (action === "cancel") {
+      // Deliberate cancel (not Ctrl+C) — keep the staged files, matching the
+      // option's hint, so don't run the rollback.
+      disarmStagingRollback();
       p.cancel("Cancelled. Your staged files are still staged.");
       process.exit(0);
     }
@@ -401,7 +796,8 @@ async function runPushPrep(opts = {}) {
       continue;
     }
 
-    // action === "commit"
+    // action === "commit" — the commit consumes the staging, so there's nothing
+    // left to roll back if the user cancels the push prompt below.
     if (isAmend) {
       await amendWithMessage(finalMessage);
       p.log.success(chalk.green(`Amended: "${finalSubject}"`));
@@ -409,6 +805,7 @@ async function runPushPrep(opts = {}) {
       await commitWithMessage(finalMessage);
       p.log.success(chalk.green(`Committed: "${finalSubject}"`));
     }
+    disarmStagingRollback();
     break;
   }
 
@@ -462,14 +859,21 @@ async function maybePush(opts, isAmend) {
 }
 
 // ─── Doctor ──────────────────────────────────────────────────────────────────
-function doctorModelFix(r) {
+function doctorModelFix(r, provider) {
+  // Keyless providers (Ollama) already return actionable messages ("pull it",
+  // "start ollama serve") — surface those directly.
+  if (!provider.needsKey) return r.message;
+
+  const keyUrl = provider.keyUrl;
   switch (r.kind) {
     case "quota":
-      return "Quota exhausted. Use a new key (pushprep config --key ...) or wait for it to reset.";
+      return `Quota exhausted. Use a new key (pushprep config --key ...) or wait for it to reset.${keyUrl ? ` Keys: ${keyUrl}` : ""}`;
     case "invalidKey":
-      return "API key rejected. Verify it at https://aistudio.google.com/app/apikey, then re-run pushprep config --key.";
+      return `API key rejected.${keyUrl ? ` Verify it at ${keyUrl}, then` : " Then"} re-run pushprep config --key.`;
     case "modelNotFound":
       return "No known model was reachable. Update pushprep, or pass --model with a current model name.";
+    case "badRequest":
+      return "The model rejected the request — your API key is fine. Update pushprep, or pass --model with a current model name.";
     case "timeout":
       return "The API timed out. Check your internet connection and try again.";
     default:
@@ -480,6 +884,7 @@ function doctorModelFix(r) {
 async function runDoctor(opts = {}) {
   console.log(chalk.bold.cyan("\n  pushprep doctor\n"));
 
+  const provider = resolveProvider(opts);
   const results = [];
 
   // Node.js version
@@ -498,19 +903,35 @@ async function runDoctor(opts = {}) {
     fix: "Run pushprep inside a git project (or run git init).",
   });
 
-  // API key
-  const apiKey = getApiKey();
+  // Active provider (informational)
   results.push({
-    ok: !!apiKey,
-    label: apiKey ? "Gemini API key found" : "No Gemini API key",
-    fix: "Set one with: pushprep config --key YOUR_GEMINI_API_KEY (or the GEMINI_API_KEY env var).",
+    ok: true,
+    label: `AI provider: ${provider.label}`,
+    fix: "",
   });
 
-  // Model reachability (only worth checking if a key exists)
-  if (apiKey) {
+  // API key — only key-based providers need one.
+  let apiKey = null;
+  if (provider.needsKey) {
+    apiKey = keyForProvider(provider);
+    results.push({
+      ok: !!apiKey,
+      label: apiKey
+        ? `${provider.label} API key found`
+        : `No ${provider.label} API key`,
+      fix: `Set one with: pushprep config (or --key). ${provider.keyUrl ? `Get a key at ${provider.keyUrl}.` : ""}`,
+    });
+  }
+
+  // Model reachability — run for keyless providers, or when a key is present.
+  if (!provider.needsKey || apiKey) {
     const spin = p.spinner();
-    spin.start("Checking model reachability...");
-    const modelResult = await checkModel(apiKey, opts.model);
+    spin.start(`Checking ${provider.label} reachability...`);
+    const modelResult = await checkModel(
+      apiKey,
+      opts.model || getStoredModel(provider.id),
+      provider.id,
+    );
     spin.stop(
       modelResult.ok
         ? chalk.green("Model reachable.")
@@ -521,7 +942,7 @@ async function runDoctor(opts = {}) {
       label: modelResult.ok
         ? `Model reachable (${modelResult.model})`
         : `Model unreachable (${modelResult.model})`,
-      fix: doctorModelFix(modelResult),
+      fix: doctorModelFix(modelResult, provider),
     });
   }
 
@@ -549,26 +970,37 @@ program
   .name("pushprep")
   .version(pkg.version, "-v, --version", "Print the installed version number")
   .description("Format → Stage → AI Commit. All in one command.")
+  // Hide commander's auto-generated "Commands:" list — every command is shown,
+  // with a description, in the curated "Commands" block below instead.
+  .configureHelp({ visibleCommands: () => [] })
   .addHelpText(
     "after",
     `
-Examples:
-  $ pushprep                         Run the full workflow
-  $ pushprep --push                  Run the workflow, then push
-  $ pushprep --amend                 Rewrite the previous commit's message
-  $ pushprep --model gemini-2.0-flash  Use a specific AI model
-  $ pushprep doctor                  Diagnose git / API key / model setup
-  $ pushprep config --key API_KEY    Save your Gemini API key
-  $ pushprep config --show           Show saved API key (masked)
-  $ pushprep config --remove         Delete the saved API key
+Commands:
+  $ pushprep                          Run the full workflow
+  $ pushprep --push                   Run the workflow, then push
+  $ pushprep --amend                  Reword the previous commit's message
+  $ pushprep --provider claude        Use a specific provider for this run
+  $ pushprep --model <name>           Use a specific model for this run
+  $ pushprep setup                    Pick a provider and add a key (wizard)
+  $ pushprep doctor                   Diagnose git / provider / model setup
+  $ pushprep config --show            Show the active model & all providers
+  $ pushprep config --provider <name> Switch the active provider
+  $ pushprep config --model <name>    Set the model for the active provider
+  $ pushprep config --key <key>       Save an API key for the active provider
 
-Get a free Gemini API key at: https://aistudio.google.com/app/apikey
+Providers: gemini (default), claude, openai, ollama (local · no key).
+Set up any of them with: pushprep setup
 `,
   );
 
 // Shared flags for the workflow commands (default + `run`).
 function addWorkflowOptions(cmd) {
   return cmd
+    .option(
+      "-P, --provider <name>",
+      "AI provider for this run (gemini, claude, openai, ollama)",
+    )
     .option(
       "-m, --model <name>",
       "Override the AI model (also settable via PUSHPREP_MODEL)",
@@ -580,59 +1012,164 @@ function addWorkflowOptions(cmd) {
     );
 }
 
-// Default action — run full workflow
-addWorkflowOptions(program).action((opts) => runPushPrep(opts));
+// Default action — run full workflow.
+// optsWithGlobals() merges options that commander routed to the root program
+// (shared flags like --provider are declared on both root and subcommands, so
+// the value can land on the root) — without it, subcommands see an empty object.
+addWorkflowOptions(program)
+  .option("--config", "Open the interactive provider & key setup wizard")
+  .action((opts, command) => {
+    const merged = command.optsWithGlobals();
+    // `pushprep --config` is a convenience alias for the setup wizard, same as
+    // `pushprep setup` / `pushprep config` with no other flags.
+    if (merged.config) return runSetup();
+    return runPushPrep(merged);
+  });
 
 // Explicit alias: pushprep run
 addWorkflowOptions(
   program.command("run").description("Explicit alias — runs the full workflow"),
-).action((opts) => runPushPrep(opts));
+).action((opts, command) => runPushPrep(command.optsWithGlobals()));
 
 // pushprep doctor — diagnose setup problems
 program
   .command("doctor")
-  .description("Check your environment: git, API key, and model reachability")
+  .description(
+    "Check your environment: git, provider key, and model reachability",
+  )
+  .option(
+    "-P, --provider <name>",
+    "Provider to diagnose (gemini, claude, openai, ollama)",
+  )
   .option("-m, --model <name>", "Model to test reachability against")
-  .action((opts) => runDoctor(opts));
+  .action((opts, command) => runDoctor(command.optsWithGlobals()));
 
-// pushprep config
-const configCmd = program
+// pushprep setup — interactive provider + key wizard
+program
+  .command("setup")
+  .description("Pick an AI provider and add its key (interactive)")
+  .action(() => runSetup());
+
+// Full config snapshot for `pushprep config --show`.
+function printConfigSummary() {
+  const s = getConfigSummary();
+  const activeId = s.provider || DEFAULT_PROVIDER;
+  const activeProvider = getProvider(activeId);
+  // The model a run would actually use: the saved override, else the default.
+  const activeModel = s.models[activeId] || activeProvider.defaultModel;
+  console.log(chalk.bold("\n  pushprep config\n"));
+  console.log(`  Active provider : ${chalk.cyan(activeProvider.label)}`);
+  console.log(`  Active model    : ${chalk.cyan(activeModel)}`);
+  console.log(
+    `  Tips            : ${s.tips ? chalk.green("on") : chalk.dim("off")}`,
+  );
+  console.log("");
+  console.log(chalk.bold("  Providers:"));
+  for (const prov of listProviders()) {
+    const key = s.keys[prov.id];
+    const model = s.models[prov.id];
+    const keyStr = prov.needsKey
+      ? key
+        ? chalk.green(maskKey(key))
+        : chalk.dim("no key")
+      : chalk.dim("no key needed");
+    const active = prov.id === activeId ? chalk.cyan("  ← active") : "";
+    const modelStr = model ? chalk.dim(`  model: ${model}`) : "";
+    console.log(`    ${prov.label.padEnd(18)} ${keyStr}${modelStr}${active}`);
+  }
+  console.log("");
+  console.log(chalk.bold("  Manage:"));
+  console.log(
+    chalk.dim("    Switch active provider   pushprep config --provider <name>"),
+  );
+  console.log(
+    chalk.dim("    Use one for a single run pushprep --provider <name>"),
+  );
+  console.log(
+    chalk.dim("    Change a provider model  pushprep config --model <name>"),
+  );
+  console.log("");
+  console.log(
+    chalk.dim(
+      "  If your active provider hits its limit, pushprep auto-switches to another configured one.",
+    ),
+  );
+  console.log(chalk.dim(`  Config: ${s.configPath}\n`));
+}
+
+// pushprep config — providers, keys, models, and tips. No flags → wizard.
+program
   .command("config")
-  .description("Manage your Gemini API key");
+  .description("Configure providers, keys, models, and tips")
+  .option(
+    "-P, --provider <name>",
+    "Switch the active provider, or scope --key/--model/--remove to it",
+  )
+  .option("--key <api_key>", "Save/update the API key for the target provider")
+  .option("--model <name>", "Set the default model for the target provider")
+  .option("--show", "Show saved providers, models, and settings")
+  .option("--remove", "Remove the target provider's saved key")
+  .option("--tips <on|off>", "Turn the subtle one-line UI tips on or off")
+  .action(async (opts, command) => {
+    opts = command.optsWithGlobals();
+    // Target for key/model/remove: --provider, else the active provider.
+    const targetId =
+      (opts.provider && opts.provider.trim().toLowerCase()) ||
+      getActiveProviderId() ||
+      DEFAULT_PROVIDER;
+    const target = getProvider(targetId);
+    let didSomething = false;
 
-configCmd
-  .option("--key <api_key>", "Save or update the Gemini API key")
-  .option("--show", "Display masked API key and config file path")
-  .option("--remove", "Delete the saved API key")
-  .action((opts) => {
-    if (opts.key) {
-      saveApiKey(opts.key.trim());
-      console.log(chalk.green("\n  ✅ API key saved successfully!"));
-      console.log(chalk.dim("  Run pushprep to get started.\n"));
-    } else if (opts.show) {
-      const info = showConfig();
-      if (info.hasKey) {
-        console.log(chalk.bold("\n  pushprep config"));
-        console.log(`  API Key : ${chalk.cyan(info.maskedKey)}`);
-        console.log(`  Config  : ${chalk.dim(info.configPath)}\n`);
-      } else {
-        console.log(chalk.yellow("\n  No API key configured."));
-        console.log(chalk.dim(`  Config path: ${info.configPath}`));
+    if (opts.provider) {
+      setActiveProvider(target.id);
+      console.log(chalk.green(`\n  ✅ Active provider: ${target.label}`));
+      if (target.needsKey && !getStoredKey(target.id) && !opts.key) {
         console.log(
-          chalk.dim("  Run: pushprep config --key YOUR_GEMINI_API_KEY\n"),
+          chalk.dim(
+            "  No key saved yet — add one with: pushprep config --key <key>  (or: pushprep setup)",
+          ),
         );
       }
-    } else if (opts.remove) {
-      removeApiKey();
-      console.log(chalk.yellow("\n  🗑️  API key removed."));
+      didSomething = true;
+    }
+
+    if (opts.key) {
+      saveProviderKey(target.id, opts.key.trim());
+      console.log(chalk.green(`\n  ✅ Saved ${target.label} API key.`));
+      didSomething = true;
+    }
+
+    if (opts.model) {
+      setStoredModel(target.id, opts.model.trim());
       console.log(
-        chalk.dim("  Run pushprep config --key <key> to add a new one.\n"),
+        chalk.green(
+          `\n  ✅ ${target.label} model set to ${opts.model.trim()}.`,
+        ),
       );
-    } else {
-      console.log(chalk.dim("\n  Usage:"));
-      console.log("    pushprep config --key <api_key>   Save API key");
-      console.log("    pushprep config --show             Show saved key");
-      console.log("    pushprep config --remove           Remove key\n");
+      didSomething = true;
+    }
+
+    if (opts.remove) {
+      removeProviderKey(target.id);
+      console.log(chalk.yellow(`\n  🗑️  Removed ${target.label} API key.`));
+      didSomething = true;
+    }
+
+    if (opts.tips !== undefined) {
+      const on = /^(on|true|1|yes)$/i.test(String(opts.tips));
+      setTipsEnabled(on);
+      console.log(chalk.green(`\n  ✅ Tips ${on ? "enabled" : "disabled"}.`));
+      didSomething = true;
+    }
+
+    if (opts.show) {
+      printConfigSummary();
+      didSomething = true;
+    }
+
+    // No flags → launch the interactive wizard.
+    if (!didSomething) {
+      await runSetup();
     }
   });
 
