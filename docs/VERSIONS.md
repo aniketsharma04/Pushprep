@@ -13,12 +13,12 @@ of changes lives in [`./CHANGELOG.md`](./CHANGELOG.md).
 
 ## Version index
 
-| Version        | Date       | Theme                             | Status        |
-| -------------- | ---------- | --------------------------------- | ------------- |
-| [1.2.0](#v120) | 2026-07-27 | Bring your own AI + friendlier UX | ✅ Released   |
-| 1.1.1          | 2026-07-27 | Gemini reliability patch          | ✅ Released   |
-| [1.1.0](#v110) | 2026-07-12 | Reliability + workflow            | ✅ Released   |
-| [1.0.0](#v100) | 2026-04-12 | Initial release                   | ✅ Released   |
+| Version        | Date       | Theme                             | Status      |
+| -------------- | ---------- | --------------------------------- | ----------- |
+| [1.2.0](#v120) | 2026-07-27 | Bring your own AI + friendlier UX | ✅ Released |
+| 1.1.1          | 2026-07-27 | Gemini reliability patch          | ✅ Released |
+| [1.1.0](#v110) | 2026-07-12 | Reliability + workflow            | ✅ Released |
+| [1.0.0](#v100) | 2026-04-12 | Initial release                   | ✅ Released |
 
 **Current published version:** `1.2.0`
 

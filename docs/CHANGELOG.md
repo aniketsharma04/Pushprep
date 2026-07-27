@@ -5,6 +5,21 @@ All notable changes to **pushprep** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-07-27
+
+### Fixed
+
+- **Every interactive run exited at the first prompt.** 1.2.0 shipped an ESC
+  listener that called `process.stdin.unref()`, which tells Node that stdin
+  doesn't count toward keeping the process alive. While a prompt waits for a
+  keypress, stdin is the _only_ referenced handle — so Node considered itself
+  idle and exited the moment the first menu appeared. The staging menu rendered,
+  then dropped straight back to the shell with no error and no cancel message.
+  The listener is now left referenced and torn down explicitly when the run
+  finishes, which was the actual goal of the `unref()`.
+
+  1.2.0 is unusable interactively; upgrade to 1.2.1.
+
 ## [1.2.0] - 2026-07-27
 
 "Bring your own AI." pushprep is no longer tied to Gemini — pick the provider you
@@ -187,6 +202,7 @@ messages. pushprep now defaults to a resilient model alias with a fallback chain
   staging, Gemini-powered Conventional Commit suggestions, and local fallback
   messages.
 
+[1.2.1]: https://github.com/aniketsharma04/Pushprep/releases/tag/v1.2.1
 [1.2.0]: https://github.com/aniketsharma04/Pushprep/releases/tag/v1.2.0
 [1.1.1]: https://github.com/aniketsharma04/Pushprep/releases/tag/v1.1.1
 [1.1.0]: https://github.com/aniketsharma04/Pushprep/releases/tag/v1.1.0

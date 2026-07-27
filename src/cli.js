@@ -128,6 +128,8 @@ function handleCancel(value) {
 //     (synchronous, via execFileSync) runs there too. Idempotent with the others.
 // Registered lazily from runPushPrep so setup/doctor/config are unaffected.
 let cancelHandlersInstalled = false;
+// Held so teardownCancelHandlers() can remove exactly this listener later.
+let escapeListener = null;
 function installCancelHandlers() {
   if (cancelHandlersInstalled) return;
   cancelHandlersInstalled = true;
@@ -156,11 +158,16 @@ function installCancelHandlers() {
   // cancel and ignores ESC entirely, so we listen for the escape keypress
   // ourselves. (A future release will make ESC step *back* one prompt at a time
   // instead of exiting outright.) TTY-only — there are no keypresses to read
-  // when input is piped. unref() so this listener never keeps the process alive
-  // after a successful run (which otherwise exits naturally at the end).
+  // when input is piped.
+  //
+  // Do NOT unref() stdin here. While a prompt waits for input, stdin is the only
+  // referenced handle keeping the event loop alive; unref'ing it makes Node
+  // consider itself idle and exit mid-prompt, so the very first menu would
+  // vanish and drop the user back at the shell. The listener is removed
+  // explicitly by teardownCancelHandlers() once the run is done instead.
   if (process.stdin.isTTY) {
     readline.emitKeypressEvents(process.stdin);
-    process.stdin.on("keypress", (_str, key) => {
+    escapeListener = (_str, key) => {
       if (key && key.name === "escape") {
         const n = runStagingRollback();
         console.log(
@@ -172,9 +179,27 @@ function installCancelHandlers() {
         );
         process.exit(0);
       }
-    });
-    process.stdin.unref();
+    };
+    process.stdin.on("keypress", escapeListener);
   }
+}
+
+// Releases stdin at the end of a successful run. Without this the keypress
+// listener holds the event loop open and the CLI hangs after printing its outro.
+// Only the ESC listener is torn down — the SIGINT and 'exit' nets stay armed.
+function teardownCancelHandlers() {
+  if (escapeListener) {
+    process.stdin.removeListener("keypress", escapeListener);
+    escapeListener = null;
+  }
+  if (process.stdin.isTTY && process.stdin.isRaw) {
+    try {
+      process.stdin.setRawMode(false);
+    } catch {
+      // Terminal already reset by clack — nothing to undo.
+    }
+  }
+  process.stdin.pause();
 }
 
 // Deliberate "Don't commit — exit" path from the commit menu. When pushprep
@@ -819,6 +844,9 @@ async function runPushPrep(opts = {}) {
       chalk.bold.cyan("🚀 All done! Run git push whenever you're ready."),
     );
   }
+
+  // Release stdin so the process can exit instead of waiting on the ESC listener.
+  teardownCancelHandlers();
 }
 
 // ─── Push helper ─────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 {
   "name": "pushprep",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Format → Stage → AI Commit. All in one command.",
   "type": "module",
   "bin": {
