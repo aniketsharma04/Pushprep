@@ -2,33 +2,50 @@ import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import chalk from "chalk";
 import path from "path";
 
-// Default model. The floating "flash-latest" alias keeps pointing at a current,
-// widely-available Flash model that follows structured-output (responseSchema)
-// contracts. Using the alias (instead of a pinned version like gemini-2.5-flash)
-// means the tool doesn't break when Google retires a specific model version for
-// new API keys. Overridable via the --model flag or the PUSHPREP_MODEL env var.
-const DEFAULT_MODEL = "gemini-flash-latest";
+// Default model. The floating "flash-lite-latest" alias keeps pointing at a
+// current, widely-available Flash-Lite model that follows structured-output
+// (responseSchema) contracts. Using an alias (instead of a pinned version like
+// gemini-2.5-flash) means the tool doesn't break when Google retires a specific
+// model version for new API keys.
+//
+// Lite is the default deliberately: it does no "thinking", so it spends no
+// reasoning tokens on a task that doesn't need them. That makes it the cheapest
+// model per commit and stretches a free-tier key considerably further.
+// Overridable via the --model flag or the PUSHPREP_MODEL env var.
+const DEFAULT_MODEL = "gemini-flash-lite-latest";
 
-// Fallback chain: if the chosen model returns a "model not found / retired"
-// error, we transparently try the next one before giving up. This is the
-// defense against the exact failure that shipped in v1.0 (gemini-2.5-flash was
-// retired for new keys, silently dropping every run to the generic fallback).
+// Fallback chain: if the chosen model fails in a way that's the model's fault,
+// we transparently try the next one before giving up. This is the defense
+// against the exact failure that shipped in v1.0 (gemini-2.5-flash was retired
+// for new keys, silently dropping every run to the generic fallback).
+//
+// gemini-2.5-flash-lite and gemini-2.5-flash were dropped in v1.1.1: both now
+// answer "no longer available to new users" for recently created keys.
+// Free-tier quota is counted per model, so a 429 on one still leaves the rest.
 const FALLBACK_MODELS = [
+  "gemini-flash-lite-latest",
+  "gemini-2.0-flash-lite",
   "gemini-flash-latest",
   "gemini-2.0-flash",
-  "gemini-2.5-flash-lite",
-  "gemini-2.0-flash-001",
 ];
 
 const DEFAULT_TEMPERATURE = 0.4;
-// Gemini Flash has a very large context window, so we can afford a generous
-// diff budget. A tiny limit was causing multi-file commits to lose files
-// (and get described only partially). Paired with the --stat summary below,
-// this keeps the full scope of the change in view.
-const DIFF_CHAR_LIMIT = 20000;
+// Diff budget, in characters (~4 chars per token). Big enough that a typical
+// multi-file commit survives intact, small enough that one run costs a few
+// thousand tokens rather than tens of thousands — free-tier keys last far
+// longer. Paired with the --stat summary below, the full scope of the change
+// stays in view even when the diff itself is truncated.
+const DIFF_CHAR_LIMIT = 12000;
+// Cap on generated tokens. Three subject+body suggestions fit comfortably; the
+// cap stops a runaway response from burning quota.
+const MAX_OUTPUT_TOKENS = 1200;
 const API_TIMEOUT_MS = 30000;
 const MIN_BODY_LENGTH = 120;
 const DEBUG = process.env.PUSHPREP_DEBUG === "1";
+
+// Error kinds that mean "this model won't work, try the next one" rather than
+// "the user's setup is broken". Only the last model's failure is reported.
+const RECOVERABLE_KINDS = new Set(["modelNotFound", "badRequest", "quota"]);
 
 /**
  * Resolves the ordered list of models to attempt: the caller's explicit choice
@@ -51,9 +68,10 @@ export function classifyError(status, message) {
   if (isQuotaError(status, message)) return "quota";
   if (isInvalidKeyError(status, message)) return "invalidKey";
   if (isModelNotFoundError(status, message)) return "modelNotFound";
+  if (message === "invalid_format") return "parse";
   if (message === "timeout") return "timeout";
   if (msg.includes("safety") || msg.includes("blocked")) return "safety";
-  if (message === "invalid_format") return "parse";
+  if (isBadRequestError(status, message)) return "badRequest";
   return "network";
 }
 
@@ -165,24 +183,49 @@ export function isModelNotFoundError(status, message) {
     status === 404 ||
     msg.includes("model not found") ||
     (msg.includes("models/") && msg.includes("not found")) ||
-    msg.includes("is not found")
+    msg.includes("is not found") ||
+    msg.includes("does not exist") ||
+    // Google retires models with this exact wording, returned as a 404.
+    msg.includes("no longer available")
   );
 }
 
 /**
  * Detects if an error is an invalid API key error.
  * Per PRD §5.4
+ *
+ * Deliberately does NOT treat a bare 400 as a bad key. Gemini answers 400
+ * INVALID_ARGUMENT for any malformed request — an unsupported generationConfig
+ * field, a bad schema — and blaming the key there sent users off rotating a
+ * perfectly good key while the real fault was in our own request body.
+ * A genuinely rejected key is 401/403, or a 400 whose body says so explicitly.
  */
 export function isInvalidKeyError(status, message) {
   const msg = message?.toLowerCase() || "";
   return (
-    status === 400 ||
     status === 401 ||
     status === 403 ||
     msg.includes("api key not valid") ||
+    msg.includes("api_key_invalid") ||
     msg.includes("invalid api key") ||
+    msg.includes("incorrect api key") ||
+    msg.includes("api key expired") ||
     msg.includes("permission denied") ||
     msg.includes("unauthorized")
+  );
+}
+
+/**
+ * Detects a malformed-request error — our request body, not the user's key.
+ * Worth retrying the same prompt against the next model, since the usual cause
+ * is a generationConfig field the current model doesn't accept.
+ */
+export function isBadRequestError(status, message) {
+  const msg = message?.toLowerCase() || "";
+  return (
+    status === 400 ||
+    msg.includes("invalid_argument") ||
+    msg.includes("invalid argument")
   );
 }
 
@@ -261,25 +304,53 @@ export function generateFallbackMessages(stagedFiles) {
  */
 async function callModelOnce(modelName, apiKey, prompt, temperature) {
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({
-    model: modelName,
-    generationConfig: {
+
+  const run = async (withThinking) => {
+    const generationConfig = {
       responseMimeType: "application/json",
       responseSchema: COMMIT_RESPONSE_SCHEMA,
       temperature,
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
+    };
+    if (withThinking) {
       // Disable "thinking" for this task: commit-message generation doesn't
-      // need it, and leaving it on roughly doubles latency (25s+ vs ~12s),
-      // which pushes runs past the timeout into the generic fallback.
-      thinkingConfig: { thinkingBudget: 0 },
-    },
-  });
+      // need it, and leaving it on roughly doubles both latency and token
+      // spend, which pushes runs past the timeout into the generic fallback.
+      generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    }
+    const model = genAI.getGenerativeModel({
+      model: modelName,
+      generationConfig,
+    });
+    return Promise.race([
+      model.generateContent(prompt),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("timeout")), API_TIMEOUT_MS),
+      ),
+    ]);
+  };
 
-  const result = await Promise.race([
-    model.generateContent(prompt),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("timeout")), API_TIMEOUT_MS),
-    ),
-  ]);
+  // Flash-Lite models don't think at all, so sending thinkingConfig to them is
+  // pure risk: the current Flash and Flash-Lite endpoints reject
+  // `thinkingBudget: 0` with 400 INVALID_ARGUMENT. Only thinking-capable models
+  // get the field, and a model that rejects it anyway is retried without it.
+  const wantsThinking = !/lite/i.test(modelName);
+  let result;
+  try {
+    result = await run(wantsThinking);
+  } catch (err) {
+    const status = err?.status || err?.response?.status || null;
+    const message = err?.message || err?.toString() || "";
+    if (!wantsThinking || !isBadRequestError(status, message)) throw err;
+    if (DEBUG) {
+      console.log(
+        chalk.magenta(
+          `[pushprep:debug] ${modelName} rejected thinkingConfig, retrying without it.`,
+        ),
+      );
+    }
+    result = await run(false);
+  }
 
   const text = result.response.text().trim();
 
@@ -343,6 +414,14 @@ function reportGenerationError(status, message) {
       console.log(
         chalk.yellow(
           "\n  ⚠️  No Gemini model was reachable. Update pushprep to the latest version, or set one with --model.\n",
+        ),
+      );
+      break;
+    case "badRequest":
+      console.log(
+        chalk.yellow(
+          "\n  ⚠️  Gemini rejected the request (not your API key — your key is fine)." +
+            "\n     Try updating pushprep, or pick another model with --model.\n",
         ),
       );
       break;
@@ -436,14 +515,16 @@ export async function generateCommitMessages(
       const message = err?.message || err?.toString() || "";
       const isLast = i === chain.length - 1;
 
-      // Only a retired/unavailable model is worth retrying on a different model;
-      // everything else (bad key, quota, timeout, parse) fails the same way for
-      // every model, so stop and report.
-      if (isModelNotFoundError(status, message) && !isLast) {
+      // Advance whenever the failure is the model's fault rather than the
+      // user's: a retired model (404), a model that rejects part of our request
+      // (400), or one whose free-tier quota is spent (429 — Gemini counts quota
+      // per model, so the rest of the chain may well be fine). A bad key or a
+      // timeout fails identically everywhere, so those stop and report.
+      if (RECOVERABLE_KINDS.has(classifyError(status, message)) && !isLast) {
         if (DEBUG) {
           console.log(
             chalk.magenta(
-              `[pushprep:debug] ${modelName} unavailable, trying next.`,
+              `[pushprep:debug] ${modelName} failed (${classifyError(status, message)}), trying next.`,
             ),
           );
         }
@@ -482,10 +563,9 @@ export async function checkModel(apiKey, preferredModel) {
       const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({
         model: modelName,
-        generationConfig: {
-          thinkingConfig: { thinkingBudget: 0 },
-          maxOutputTokens: 16,
-        },
+        // No thinkingConfig here: current Flash endpoints reject it, and a
+        // liveness probe must not fail on an optional field.
+        generationConfig: { maxOutputTokens: 16 },
       });
       const result = await Promise.race([
         model.generateContent("Reply with the single word: ok"),
@@ -499,7 +579,12 @@ export async function checkModel(apiKey, preferredModel) {
       lastError = err;
       const status = err?.status || err?.response?.status || null;
       const message = err?.message || err?.toString() || "";
-      if (isModelNotFoundError(status, message) && i < chain.length - 1) {
+      // Keep probing: the point of doctor is to answer "can this key reach ANY
+      // model?", so a single dead or exhausted model isn't a verdict.
+      if (
+        RECOVERABLE_KINDS.has(classifyError(status, message)) &&
+        i < chain.length - 1
+      ) {
         continue;
       }
       return {

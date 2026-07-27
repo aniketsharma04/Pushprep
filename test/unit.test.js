@@ -55,6 +55,26 @@ test("isInvalidKeyError detects auth failures", () => {
   assert.ok(!isInvalidKeyError(200, "ok"));
 });
 
+test("a bare 400 is a bad request, not a bad key", () => {
+  // Gemini answers 400 INVALID_ARGUMENT for an unsupported generationConfig
+  // field. Calling that an invalid key sent users to rotate a working key.
+  const invalidArgument = "Request contains an invalid argument.";
+  assert.ok(!isInvalidKeyError(400, invalidArgument));
+  assert.equal(classifyError(400, invalidArgument), "badRequest");
+  // A 400 that really is about the key still classifies as one.
+  assert.equal(classifyError(400, "API key not valid"), "invalidKey");
+});
+
+test("retired models classify as modelNotFound", () => {
+  assert.equal(
+    classifyError(
+      404,
+      "This model models/gemini-2.5-flash is no longer available to new users.",
+    ),
+    "modelNotFound",
+  );
+});
+
 test("classifyError maps errors to the right kind", () => {
   assert.equal(classifyError(429, ""), "quota");
   assert.equal(classifyError(401, ""), "invalidKey");

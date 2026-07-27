@@ -470,6 +470,8 @@ function doctorModelFix(r) {
       return "API key rejected. Verify it at https://aistudio.google.com/app/apikey, then re-run pushprep config --key.";
     case "modelNotFound":
       return "No known model was reachable. Update pushprep, or pass --model with a current model name.";
+    case "badRequest":
+      return "The model rejected the request — your API key is fine. Update pushprep, or pass --model with a current model name.";
     case "timeout":
       return "The API timed out. Check your internet connection and try again.";
     default:
