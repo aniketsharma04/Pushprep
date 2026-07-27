@@ -15,13 +15,12 @@ of changes lives in [`./CHANGELOG.md`](./CHANGELOG.md).
 
 | Version        | Date       | Theme                             | Status        |
 | -------------- | ---------- | --------------------------------- | ------------- |
-| [1.2.0](#v120) | —          | Bring your own AI + friendlier UX | 🚧 Unreleased |
+| [1.2.0](#v120) | 2026-07-27 | Bring your own AI + friendlier UX | ✅ Released   |
 | 1.1.1          | 2026-07-27 | Gemini reliability patch          | ✅ Released   |
 | [1.1.0](#v110) | 2026-07-12 | Reliability + workflow            | ✅ Released   |
 | [1.0.0](#v100) | 2026-04-12 | Initial release                   | ✅ Released   |
 
-**Current published version:** `1.1.1` — 1.2.0 is prepared on `v1.2-dev` and not
-yet published.
+**Current published version:** `1.2.0`
 
 ---
 
@@ -143,5 +142,4 @@ ship.
 
 ---
 
-_Last updated 2026-07-27, after the v1.1.1 patch release. v1.2.0 is staged on
-`v1.2-dev` and awaiting publication._
+_Last updated 2026-07-27, for the v1.2.0 release._

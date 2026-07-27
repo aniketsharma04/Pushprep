@@ -5,7 +5,7 @@ All notable changes to **pushprep** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] - Unreleased
+## [1.2.0] - 2026-07-27
 
 "Bring your own AI." pushprep is no longer tied to Gemini — pick the provider you
 already have, whether that's a cloud key or a model running locally on your
