@@ -5,7 +5,7 @@ All notable changes to **pushprep** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] - 2026-07-12
+## [1.2.0] - Unreleased
 
 "Bring your own AI." pushprep is no longer tied to Gemini — pick the provider you
 already have, whether that's a cloud key or a model running locally on your
@@ -75,35 +75,51 @@ machine. This release also folds in a small set of subtle, one-line UI tips.
 
 ### Fixed
 
-- **A valid API key was reported as invalid.** Any `400` from a provider was
+- The Gemini reliability fixes first shipped in **[1.1.1](#111---2026-07-27)** —
+  a valid key no longer reported as invalid, `thinkingConfig` no longer sent to
+  models that reject it, retired models dropped from the chain, and quota
+  failures advancing the chain instead of ending the run — are carried forward
+  here and generalized to every provider. Error classification, the
+  "the model rejected the request — not your API key" message, and the
+  advance-on-recoverable-failure rule now live in the shared `src/prompt.js`
+  layer, so Claude, OpenAI, and Ollama get the same handling rather than each
+  reimplementing it.
+
+## [1.1.1] - 2026-07-27
+
+A patch release fixing the Gemini failure that dropped every run into the generic
+local fallback while blaming a perfectly valid API key.
+
+### Fixed
+
+- **A valid API key was reported as invalid.** Any `400` from Gemini was
   classified as a rejected key, so pushprep printed "🔑 Invalid Gemini API Key"
   and fell back to generic local messages — sending users to rotate a key that
   was working fine. Gemini returns `400 INVALID_ARGUMENT` for any malformed
   request, and pushprep was sending one (below). A bad key is now only inferred
   from `401`/`403` or an explicit "API key not valid" message; a genuine `400`
-  reports as "the model rejected the request — not your API key".
+  reports as "Gemini rejected the request — not your API key".
 - **The request Gemini was rejecting.** pushprep sent
   `thinkingConfig: { thinkingBudget: 0 }` to disable reasoning tokens, but the
   current `gemini-flash-latest` and `gemini-flash-lite-latest` endpoints reject
-  that field outright. It's now sent only to thinking-capable models, and a model
-  that rejects it anyway is retried once without it.
+  that field outright. It is now sent only to thinking-capable models, and a
+  model that rejects it anyway is retried once without it.
 - **Retired models in the fallback chain.** `gemini-2.5-flash-lite` and
   `gemini-2.5-flash` now return _"no longer available to new users"_ for keys
-  created recently. They're out of the chain, and that wording is recognized as a
-  retired model.
+  created recently. They are out of the chain, and that wording is recognized as
+  a retired model.
 - **A single exhausted model no longer ends the run.** Gemini's free-tier quota
-  is counted per model, so a `429` on one left three working models untried.
+  is counted per model, so a `429` on one left the remaining models untried.
   Quota and bad-request failures now advance down the model chain the same way a
   retired model does — in both generation and `pushprep doctor`, which had been
   able to declare a healthy key dead on the first model it tried.
 
 ### Changed
 
-- **Default Gemini model is now `gemini-flash-lite-latest`** (was
-  `gemini-flash-latest`). Flash-Lite does no "thinking", so it spends no
-  reasoning tokens on a task that doesn't need them: a commit that previously
-  cost ~20 thinking tokens per call on top of the output now costs none, and a
-  free-tier key stretches considerably further. Generation measures ~2.5s.
+- **Default model is now `gemini-flash-lite-latest`** (was `gemini-flash-latest`).
+  Flash-Lite does no "thinking", so it spends no reasoning tokens on a task that
+  doesn't need them: a commit that previously cost reasoning tokens on top of the
+  output now costs none, and a free-tier key stretches considerably further.
 - **Diff budget trimmed from 20,000 to 12,000 characters**, and generation capped
   at 1,200 output tokens. The complete file list and `--stat` summary are still
   sent in full, so every file is still accounted for in the message.
@@ -172,5 +188,6 @@ messages. pushprep now defaults to a resilient model alias with a fallback chain
   messages.
 
 [1.2.0]: https://github.com/aniketsharma04/Pushprep/releases/tag/v1.2.0
+[1.1.1]: https://github.com/aniketsharma04/Pushprep/releases/tag/v1.1.1
 [1.1.0]: https://github.com/aniketsharma04/Pushprep/releases/tag/v1.1.0
 [1.0.0]: https://github.com/aniketsharma04/Pushprep/releases/tag/v1.0.0
