@@ -5,6 +5,43 @@ All notable changes to **pushprep** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-07-28
+
+### Fixed
+
+- **"Choose specific files" was unusable once the list outgrew the terminal.**
+  The file picker used `multiselect` from `@clack/prompts`, which renders every
+  option in a single frame — its scrolling window (`maxItems`) is implemented
+  for `select` only. Each redraw then moves the cursor up by the full frame
+  height with no clamp to the terminal height, so as soon as the list was taller
+  than the viewport the terminal scrolled, the cursor-up landed in the wrong
+  place, and every repaint overwrote the previous one. The list turned to
+  garbage: you could no longer tell which row was highlighted or which files
+  were ticked, which made picking specific files impossible.
+
+  This was easy to hit, because `git status` runs with `-u`, so a single
+  untracked folder (`dist/`, `build/`, `coverage/`) is expanded into every file
+  inside it — a list of hundreds is common. On a 30-row terminal the picker
+  broke at roughly 26 files.
+
+  The picker is now a scrolling list (`src/file-picker.js`) that keeps the frame
+  shorter than the terminal, follows the cursor with `↑ N more` / `↓ N more`
+  markers, and shows a live `(n/total selected)` count in the title. It renders
+  identically to the other prompts and keeps the same keys — `↑↓` to move,
+  `space` to select, `a` to toggle all, `enter` to confirm.
+
+- **Long file lists no longer scroll the run off the screen.** The "Unstaged
+  files" and "Already staged" summaries printed every path, pushing the banner
+  and formatting results out of view before the staging prompt appeared. They
+  now print the first 12 and summarise the rest as `… and N more`.
+
+### Changed
+
+- `@clack/core` is now a direct dependency (it was already installed as a
+  transitive one) since the file picker builds on its `MultiSelectPrompt`.
+  Node 18 support is unchanged — upgrading to `@clack/prompts` 1.x would have
+  fixed the rendering upstream but requires Node >= 20.12.
+
 ## [1.2.1] - 2026-07-27
 
 ### Fixed

@@ -42,6 +42,7 @@ import {
   pushCurrent,
 } from "./git.js";
 import { formatFiles } from "./formatter.js";
+import { multiselectScrolling } from "./file-picker.js";
 import {
   generateCommitMessages,
   checkModel,
@@ -228,6 +229,22 @@ async function exitWithoutCommitting() {
     );
   }
   process.exit(0);
+}
+
+// ─── File list printing ──────────────────────────────────────────────────────
+// Prints a changed-file list, but never more than a screenful. An untracked
+// build folder can expand into hundreds of paths (git status runs with -u, so
+// directories are listed file by file); dumping all of them scrolls the banner
+// and the rest of the run off the screen before the staging prompt even opens.
+const FILE_LIST_LIMIT = 12;
+
+function printFileList(files, limit = FILE_LIST_LIMIT) {
+  for (const f of files.slice(0, limit)) {
+    console.log(chalk.dim(`     • ${f}`));
+  }
+  if (files.length > limit) {
+    console.log(chalk.dim(`     … and ${files.length - limit} more`));
+  }
 }
 
 // ─── Subtle one-line tips ────────────────────────────────────────────────────
@@ -486,17 +503,13 @@ async function runPushPrep(opts = {}) {
   if (unstaged.length > 0) {
     console.log("");
     console.log(chalk.bold(`  📂 Unstaged files (${unstaged.length}):`));
-    for (const f of unstaged) {
-      console.log(chalk.dim(`     • ${f}`));
-    }
+    printFileList(unstaged);
   }
 
   if (alreadyStaged.length > 0) {
     console.log("");
     console.log(chalk.bold(`  ✅ Already staged (${alreadyStaged.length}):`));
-    for (const f of alreadyStaged) {
-      console.log(chalk.dim(`     • ${f}`));
-    }
+    printFileList(alreadyStaged);
   }
 
   console.log("");
@@ -532,8 +545,10 @@ async function runPushPrep(opts = {}) {
     } else if (stagingChoice === "specific") {
       const fileOptions = unstaged.map((f) => ({ value: f, label: f }));
 
-      tip("space to select · a to toggle all · enter to confirm");
-      const chosen = await p.multiselect({
+      tip("↑↓ to move · space to select · a to toggle all · enter to confirm");
+      // Scrolling picker, not p.multiselect: clack's renders every option in one
+      // frame, which breaks the redraw once the list outgrows the terminal.
+      const chosen = await multiselectScrolling({
         message: "Select files to stage:",
         options: fileOptions,
         required: true,

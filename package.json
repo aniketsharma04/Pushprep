@@ -1,6 +1,6 @@
 {
   "name": "pushprep",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Format → Stage → AI Commit. All in one command.",
   "type": "module",
   "bin": {
@@ -34,6 +34,7 @@
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",
+    "@clack/core": "^0.3.5",
     "@clack/prompts": "^0.7.0",
     "@google/generative-ai": "^0.21.0",
     "chalk": "^5.3.0",
