@@ -5,6 +5,61 @@ All notable changes to **pushprep** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - 2026-07-28
+
+The Ollama provider shipped in 1.2.0 but had never been exercised against a
+running Ollama server. It turns out it could not produce a commit message at
+all — every run fell back to the generic file-list messages. This release is the
+result of testing it end to end.
+
+### Fixed
+
+- **Ollama never returned a usable commit message.** The request asked for
+  `format: "json"`, which only guarantees *syntactically* valid JSON — it says
+  nothing about the shape. Local models answered the "return 3 objects" prompt
+  with a single `{subject, body}` object, `parseCommitMessages` rejected it as
+  `invalid_format`, and the run silently degraded to the local fallback. Every
+  attempt failed this way. The request now sends a real JSON schema (Ollama
+  structured outputs), which constrains decoding to exactly three
+  `{subject, body}` objects.
+
+- **Realistic diffs always timed out.** The 90s budget was too small for local
+  inference. A cold start on a CPU-only machine with a multi-file diff measured
+  ~120s — about 5s to load the model, 66s to evaluate the prompt, and 49s to
+  generate — so anything beyond a trivial change hit the timeout and fell back.
+  The default is now 240s, overridable with `PUSHPREP_OLLAMA_TIMEOUT_MS` for
+  slower hardware. There is no per-token cost locally, so waiting is cheaper
+  than a useless result.
+
+- **`pushprep doctor` passed models that cannot generate text.** The check only
+  confirmed the model appeared in `/api/tags`, so pointing pushprep at an
+  embedding model (`nomic-embed-text` and friends) reported "Model reachable"
+  and then failed at commit time with a 400. It now also inspects the model's
+  `capabilities` and explains the problem. Ollama builds that don't report
+  capabilities are treated as before.
+
+- **A keyless provider reported an API key problem.** When Ollama rejected a
+  request, the error read "not your API key — your key is fine" — confusing for
+  a provider that has no key — and hid Ollama's own explanation. Keyless
+  providers now surface the real reason, e.g. `"nomic-embed-text" does not
+  support chat`.
+
+- **Regenerate produced the same suggestions.** `🔄 Regenerate` raises the
+  temperature to add variety, but the Ollama provider never forwarded it to the
+  API. It now does, and also caps generation with `num_predict` so a runaway
+  local model can't generate until the timeout.
+
+### Added
+
+- `test/ollama.test.js` — 17 tests covering the request shape, host resolution,
+  error mapping, and the `doctor` capability check. They stub `fetch`, so they
+  run in CI with no Ollama installed. The provider previously had no tests.
+
+- README guidance on running locally with Ollama: how to select a model, why
+  model size matters more here than with the hosted providers, what to expect
+  for speed without a GPU, and a note that a saved key for another provider is
+  still used as a fallback if Ollama is unreachable.
+
 ## [1.2.2] - 2026-07-28
 
 ### Fixed

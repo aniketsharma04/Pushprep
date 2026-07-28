@@ -40,7 +40,8 @@ first time you run `pushprep` without a key, it offers the same one-question
 setup inline — so you can skip Step 1 entirely.
 
 Prefer to run fully local with no API key? Choose **Ollama** in setup and pull a
-model (e.g. `ollama pull llama3.2`).
+model (e.g. `ollama pull llama3.2`). See [Running locally with
+Ollama](#running-locally-with-ollama) for how to pick a model.
 
 ---
 
@@ -62,6 +63,38 @@ pushprep config --provider claude --key ... # or configure one directly
 pushprep --provider openai                  # use a provider for a single run
 pushprep config --show                      # see all providers, keys, models
 ```
+
+### Running locally with Ollama
+
+Ollama needs no API key — [install it](https://ollama.com), pull a model, and
+point pushprep at it:
+
+```bash
+ollama pull llama3.2                     # any chat model works
+pushprep config --provider ollama        # make it the active provider
+pushprep doctor --provider ollama        # confirm the server + model are ready
+```
+
+**Model choice matters more than with the hosted providers.** Commit generation
+sends a large prompt (the staged diff plus the formatting rules), and small
+models handle that unevenly: `llama3.2` (3B) is quick and fine for focused
+commits, but on a large multi-file diff it can drift and describe the wrong
+thing. If your messages look inaccurate, move to a bigger model:
+
+```bash
+ollama pull qwen2.5-coder:7b
+pushprep config --provider ollama --model qwen2.5-coder:7b
+```
+
+Generation runs on your own hardware, so it is far slower than a hosted API when
+there's no GPU — a multi-file diff can take a couple of minutes on CPU. pushprep
+waits up to 240s; raise it with `PUSHPREP_OLLAMA_TIMEOUT_MS` if your machine
+needs longer. Point `OLLAMA_HOST` at another machine to use its GPU instead.
+
+> **Note:** if Ollama is unreachable and you have another provider's key saved,
+> pushprep falls back to it — which sends the diff off your machine. For a
+> strictly local setup, keep no other keys saved (`pushprep config --show`
+> lists them).
 
 Keys are stored per provider, so you can keep several configured and switch with
 `--provider` or `pushprep config --provider <name>`.
@@ -94,7 +127,9 @@ Keys are stored per provider, so you can keep several configured and switch with
 `PUSHPREP_PROVIDER` selects the provider; `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY` supply per-provider keys, with `PUSHPREP_API_KEY` as a universal
 fallback; `PUSHPREP_MODEL` overrides the model; `PUSHPREP_TIPS=0` silences tips;
-`PUSHPREP_NO_UPDATE=1` disables the automatic self-update.
+`PUSHPREP_NO_UPDATE=1` disables the automatic self-update. For Ollama,
+`OLLAMA_HOST` points at a non-default server and `PUSHPREP_OLLAMA_TIMEOUT_MS`
+raises the 240s generation timeout (a large diff on a CPU-only machine is slow).
 
 ---
 

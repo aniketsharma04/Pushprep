@@ -82,10 +82,16 @@ function reportGenerationError(provider, status, message) {
       );
       break;
     case "badRequest":
+      // Keyless providers (Ollama) have no key to reassure anyone about, and
+      // their message is already specific ("X does not support chat") — so show
+      // it rather than a generic "update pushprep".
       console.log(
         chalk.yellow(
-          `\n  ⚠️  ${label} rejected the request (not your API key — your key is fine).` +
-            `\n     Try updating pushprep, or pick another model with --model.\n`,
+          provider.needsKey
+            ? `\n  ⚠️  ${label} rejected the request (not your API key — your key is fine).` +
+                `\n     Try updating pushprep, or pick another model with --model.\n`
+            : `\n  ⚠️  ${label} rejected the request: ${message}` +
+                `\n     Pick a different model with --model.\n`,
         ),
       );
       break;
